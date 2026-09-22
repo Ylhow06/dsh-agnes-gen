@@ -56,7 +56,7 @@ npm pack .
 dsh plugin --profile <profile> add ./dsh-agnes-gen-0.1.0.tgz
 ```
 
-> **前置条件**：宿主 DSH 需提供 `@deepseek-ai/dsh-tools` 与 `@deepseek-ai/schemastery`（本插件在 `peerDependencies` 里声明）。任何正常安装的 DSH `0.1.6-alpha.2` 都自带这两个包，无需手动安装。
+> **前置条件**：宿主 DSH 需提供 `@deepseek-ai/dsh-tools` 与 `@deepseek-ai/schemastery`（本插件在 `peerDependencies` 里声明）。DSH `0.1.6-alpha.x` **或** `0.1.7-alpha.x` 都自带这两个包，无需手动安装；本插件同时兼容这两个版本线。
 
 ### 申请 Agnes API Key
 
@@ -148,6 +148,8 @@ agnes_video(prompt="夜晚森林中三只猫组成微型铜管乐队向前行进
 >   rateLimit: true
 >   outDir: ''
 > ```
+
+> **DSH 0.1.7 兼容说明**：`0.1.7-alpha` 把 DSH 的设置系统换成「Profile 插件配置」模型，不再提供 `settingsScope` 自定义配置卡和 `settings.yaml` 用户层。此版本下插件**自动改用 DSH 从 `Config` schema 生成的原生设置表单**：所有字段（两站 Key、站点、模型列表、RPM、ffmpeg、outDir）照常出现、写入当前 profile 的 `cordis.patch.yml` 并立即生效；仅少一个「校验 Key & 拉取模型」专用按钮，其余行为一致。两个生成工具在 `0.1.6` 与 `0.1.7` 下都完全可用。
 
 ### 完整配置项
 

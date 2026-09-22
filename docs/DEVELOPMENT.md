@@ -23,6 +23,10 @@ Host 侧使用两个第一方依赖，在 `peerDependencies` 里声明（版本�
 | `@deepseek-ai/dsh-tools` | `defineTool`——工具定义、参数编译与校验 |
 | `@deepseek-ai/schemastery` | 配置 schema（`.default()` / `.min()` / `.role('secret')`） |
 
+`dsh-tools` 的 peer 范围是 `^0.1.6-alpha.2 || ^0.1.7-alpha.1`——两个版本线都兼容。注意用单个 `>=…<…` 范围会因为 node-semver 的 prerelease 语义漏掉 `0.1.7-alpha.1`，必须给每个 patch 各写一个 `^` 分支。
+
+DSH 的设置接口在 `0.1.6` 与 `0.1.7` 是两套不兼容的实现：`0.1.6` 的 `SettingsProvider` 提供 `get(ns)` / `installSection(...)` / `describe()`；`0.1.7` 的 `SettingsForms` 不再有这三者，只有 `configure/describe/update/replace/mutate`，配置改由插件条目的 `cordis.patch.yml` 承载。`index.js` 用 `typeof settings.get === "function"` 在运行期二选一，浏览器半侧用 `ctx.settingsScope` 是否存在判断（guard 对「已声明但未提供的服务」返回 `undefined` 而不抛错，因此 `inject` 里保留 `"settingsScope"` 是安全的）。自检（`selfcheck.mjs`）覆盖了两条路径。
+
 ```
 .
 ├── package.json           # dsh.bundle.patch 指向组合层；dsh.client 声明浏览器半侧

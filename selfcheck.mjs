@@ -416,6 +416,81 @@ check(
   overridden.image["2K"] === 10 && overridden.image["4K"] === 1,
   `2K=${overridden.image["2K"]} 4K=${overridden.image["4K"]}`,
 );
+
+// ---- 4c. DSH 0.1.7 设置接口兼容（SettingsForms 表面） ----
+// 0.1.7 的 `ctx.settings` 是 SettingsForms：**没有** `get` / `installSection`，
+// 只有 `configure`/`describe`/`update`/`replace`/`mutate`。index.js 应按服务
+// 表面二选一：0.1.6 走 installSection，0.1.7 走「配置 = rawConfig + 原生自动
+// 表单」。这里用等价的假 0.1.7 服务验证：不抛错、不注册 section、configure
+// 被调用、工具照常注册。
+let v17Configured = false;
+let v17ConfigureArgs = null;
+const v17Registered = [];
+const v17Routes = [];
+// 复用一个最小 0.1.7 风格 ctx：settings 服务只有 SettingsForms 的方法。
+const fakeCtxV17 = {
+  logger: () => ({ info() {}, warn() {} }),
+  tools: { register: (def) => v17Registered.push(def) },
+  effect: (fn) => {
+    // configure() 返回 disposer；模拟真实 effect 收纳它。
+    const disposer = fn();
+    return typeof disposer === "function" ? disposer : () => {};
+  },
+  inject: (deps, cb) => {
+    if (deps.includes("skills")) {
+      cb({ skills: { register() {} } });
+      return;
+    }
+    if (deps.includes("settings")) {
+      // 0.1.7 SettingsForms 表面：无 get / installSection，只有 configure。
+      cb({
+        settings: {
+          configure: (presentation) => {
+            v17Configured = true;
+            v17ConfigureArgs = presentation;
+            return () => {};
+          },
+        },
+      });
+      return;
+    }
+    if (deps.includes("webServer")) {
+      cb({
+        effect: (fn) => {
+          const disposer = fn();
+          return typeof disposer === "function" ? disposer : () => {};
+        },
+        webServer: { register: (route) => v17Routes.push(route) || (() => {}) },
+      });
+    }
+  },
+};
+let v17ApplyError = "";
+try {
+  mod.apply(fakeCtxV17, {});
+} catch (err) {
+  v17ApplyError = err.message;
+}
+check(
+  "0.1.7 设置表面下 apply() 不抛错",
+  v17ApplyError === "",
+  v17ApplyError,
+);
+// 关键行为：0.1.7 下不调用 installSection（无该接口），而是显式请求 auto
+// 自动生成表单（由原生 Config schema 渲染）。installedSection 保持 0.1.6
+// 时写入的值，未被 0.1.7 覆盖。
+check("0.1.7 表面不调用 installSection（走原生自动表单）", installedSection?.ns === "agnes-gen");
+check("0.1.7 表面触发 configure({ auto })", v17Configured === true, JSON.stringify(v17ConfigureArgs));
+check(
+  "0.1.7 表面请求的是自动生成（auto=true）",
+  v17ConfigureArgs?.auto === true,
+  JSON.stringify(v17ConfigureArgs),
+);
+check(
+  "0.1.7 表面下工具仍照常注册",
+  v17Registered.length === 2,
+  v17Registered.map((d) => d.name).join(", "),
+);
 check(
   "被覆盖的档位被标记出来",
   overridden.overridden.includes("imageRpm1K") && overridden.overridden.includes("videoRpm"),

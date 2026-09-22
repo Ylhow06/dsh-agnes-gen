@@ -503,49 +503,85 @@ export function apply(ctx, rawConfig) {
   // 此时配置完全由组合层与默认值决定（settingsSource 保持空覆盖）。
   ctx.inject(["settings"], (settingsCtx) => {
     try {
-      // `get()` 是服务内的同步字典查找，代价可以忽略；因此工具执行时直接读，
-      // 不做任何缓存——缓存只会引入「配置改了但没生效」这类问题。
-      settingsSource = () => settingsCtx.settings.get(AGNES_SETTINGS_NS) ?? {};
+      const settings = settingsCtx.settings;
 
-      /**
-       * 读用户层的原始键名。`describe()` 是 dsh-settings 明示给配置界面用的
-       * 接口（注释原文：把组合 base 与 raw user 一起给出，「so a form can mark
-       * which fields the user overrode」），这里用它取**未脱敏**的用户层，
-       * 随后只保留键名。代价是它会克隆每个已注册命名空间的 base/user，
-       * 但这条路径只在用户点「检测」/打开配置页时走到，可以接受。
-       */
-      settingsUserKeys = () => {
-        try {
-          const views = settingsCtx.settings.describe?.();
-          const view = Array.isArray(views) ? views.find((v) => v.ns === AGNES_SETTINGS_NS) : undefined;
-          const user = view?.user;
-          return typeof user === "object" && user !== null && !Array.isArray(user) ? Object.keys(user) : [];
-        } catch {
-          // describe 不可用（例如更早的 DSH 版本）时退化为「没有覆盖」。
-          return [];
+      // DSH 0.1.6 与 0.1.7 的 `settings` 服务是两套不兼容的实现：
+      //   - 0.1.6 (`SettingsProvider`)：提供 `get(ns)` / `installSection(...)` /
+      //     `describe()`；用户层叠加在组合 base 之上，读到解析值。
+      //   - 0.1.7 (`SettingsForms`)：**没有** `get` / `installSection`；配置
+      //     直接由当前插件的 Cordis 条目配置（rawConfig）承载，DSH 从我们导出
+      //     的 `Config` schema 自动生成设置表单。这里的 `SettingsForms` 只负责
+      //     表单读写与原生 config-editor，不参与工具读配置。
+      // 按方法存在与否在运行期二选一，工具在两种版本下都能工作。
+      if (typeof settings.get === "function") {
+        // ---------------- DSH 0.1.6 路径 ----------------
+
+        // `get()` 是服务内的同步字典查找，代价可以忽略；因此工具执行时直接读，
+        // 不做任何缓存——缓存只会引入「配置改了但没生效」这类问题。
+        settingsSource = () => settings.get(AGNES_SETTINGS_NS) ?? {};
+
+        /**
+         * 读用户层的原始键名。`describe()` 是 dsh-settings 明示给配置界面用的
+         * 接口（注释原文：把组合 base 与 raw user 一起给出，「so a form can mark
+         * which fields the user overrode」），这里用它取**未脱敏**的用户层，
+         * 随后只保留键名。代价是它会克隆每个已注册命名空间的 base/user，
+         * 但这条路径只在用户点「检测」/打开配置页时走到，可以接受。
+         */
+        settingsUserKeys = () => {
+          try {
+            const views = settings.describe?.();
+            const view = Array.isArray(views) ? views.find((v) => v.ns === AGNES_SETTINGS_NS) : undefined;
+            const user = view?.user;
+            return typeof user === "object" && user !== null && !Array.isArray(user) ? Object.keys(user) : [];
+          } catch {
+            // describe 不可用（例如更早的 DSH 版本）时退化为「没有覆盖」。
+            return [];
+          }
+        };
+
+        const describe = (value) => {
+          const limits = effectiveLimits(value);
+          return (
+            `站点 ${siteOf(value).label}，档位 ${limits.planLabel}，限流 ${value.rateLimit !== false ? "开" : "关"}，` +
+            `图片 ${Object.entries(limits.image)
+              .map(([tier, rpm]) => `${tier}=${rpm}`)
+              .join(" ")}，视频 ${limits.video} RPM`
+          );
+        };
+
+        settings.installSection(ctx, AGNES_SETTINGS_NS, Config, config, {
+          // setSource 收到「当前解析值」的读取函数：服务在场时读用户层，
+          // 服务消失时自动回落到组合层 entry。这里不用它，因为直接读服务
+          // 更简单；但回调必须提供，installSection 会调用它。
+          setSource() {},
+          onChange() {
+            logger.info(`配置已更新（${describe(effectiveConfig())}）`);
+          },
+        });
+        logger.info(`设置 namespace "${AGNES_SETTINGS_NS}" 已注册（${describe(effectiveConfig())}）`);
+      } else {
+        // ---------------- DSH 0.1.7 路径 ----------------
+
+        // 配置由 rawConfig 承载：`effectiveConfig()` = 默认值 + 组合层(rawConfig)。
+        // 保持 settingsSource / settingsUserKeys 为空覆盖，工具照常工作。
+        // 显式请 DSH 从导出 `Config` 自动生成设置表单（默认就是 auto=true，
+        // 这里只是确保打开该能力；返回值是 disposer，挂到本插件 effect 上）。
+        if (typeof settings.configure === "function") {
+          ctx.effect(
+            () => {
+              // configure 在「本条目已注册过页面策略」时会抛；我们是唯一调用方，
+              // 不应触发，但仍放 try 里兜底。
+              const dispose = settings.configure({ auto: true });
+              return typeof dispose === "function" ? dispose : () => {};
+            },
+            "dsh-agnes-gen: settings auto-form",
+          );
         }
-      };
-
-      const describe = (value) => {
-        const limits = effectiveLimits(value);
-        return (
-          `站点 ${siteOf(value).label}，档位 ${limits.planLabel}，限流 ${value.rateLimit !== false ? "开" : "关"}，` +
-          `图片 ${Object.entries(limits.image)
-            .map(([tier, rpm]) => `${tier}=${rpm}`)
-            .join(" ")}，视频 ${limits.video} RPM`
+        logger.info(
+          `运行于 DSH 0.1.7+ 设置接口：使用插件条目配置（rawConfig），设置表单由 DSH 自 ` +
+            `Config 自动生成。`,
         );
-      };
-
-      settingsCtx.settings.installSection(ctx, AGNES_SETTINGS_NS, Config, config, {
-        // setSource 收到「当前解析值」的读取函数：服务在场时读用户层，
-        // 服务消失时自动回落到组合层 entry。这里不用它，因为直接读服务
-        // 更简单；但回调必须提供，installSection 会调用它。
-        setSource() {},
-        onChange() {
-          logger.info(`配置已更新（${describe(effectiveConfig())}）`);
-        },
-      });
-      logger.info(`设置 namespace "${AGNES_SETTINGS_NS}" 已注册（${describe(effectiveConfig())}）`);
+      }
     } catch (err) {
       // schema 无 `.loose()`，所以用户层里一个非法值（例如 imageRpm1K: -5）
       // 会让 register() 抛错。这里刻意**只警告不抛出**：插件行照常加载、
