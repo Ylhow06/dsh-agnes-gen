@@ -1,0 +1,82 @@
+# ---- 依赖 ----
+node_modules/
+.pnpm-store/
+jspm_packages/
+bower_components/
+
+# ---- 构建 / 缓存 ----
+dist/
+build/
+.cache/
+.temp/
+.tmp/
+*.tsbuildinfo
+
+# ---- 打包 / 本地验证产物 ----
+# 开发时在本仓库内建的 node_modules 联接（见 README「开发与测试回路」）
+# 已被上面的 node_modules/ 覆盖，不会进仓库。
+*.tgz
+.npm-cache/
+.scratch/
+
+# ---- 本插件生成物 ----
+# agnes_image / agnes_video 的默认输出目录
+out/
+out/agnes-images/
+out/agnes-videos/
+/videos/
+/tmp-media/
+
+# ---- 限流状态文件 ----
+agnes-ratelimit/
+.agnes-ratelimit*
+
+# ---- 密钥 / 本地凭证 ----
+.credentials.yaml
+.credentials.yml
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# ---- 日志 ----
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ---- 测试 / 覆盖率 ----
+coverage/
+.nyc_output/
+*.lcov
+
+# ---- 编辑器 / IDE ----
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+*~
+
+# ---- 操作系统 ----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ---- 杂项 ----
+*.local
+.eslintcache
+.stylelintcache
+node_modules/.cache/

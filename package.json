@@ -1,0 +1,63 @@
+{
+  "name": "dsh-agnes-gen",
+  "version": "0.1.0",
+  "description": "Agnes AI 图像 / 视频生成插件：注册 agnes_image 与 agnes_video 工具，内置跨进程 RPM 限流、429 退避与本地 ffmpeg 转 GIF；带 Web 配置卡（API Key / RPM 预设 / ffmpeg 检测）。",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "deepseek",
+    "agnes",
+    "image-generation",
+    "video-generation",
+    "text-to-image",
+    "gif"
+  ],
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./lib/client-bundle.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "skills",
+    "cordis.patch.yml",
+    "README.md",
+    "docs",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "license": "MIT",
+  "author": "Ylhow06",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ylhow06/dsh-agnes-gen.git"
+  },
+  "homepage": "https://github.com/Ylhow06/dsh-agnes-gen#readme",
+  "bugs": {
+    "url": "https://github.com/Ylhow06/dsh-agnes-gen/issues"
+  },
+  "scripts": {
+    "check": "node selfcheck.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.6-alpha.2",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  }
+}

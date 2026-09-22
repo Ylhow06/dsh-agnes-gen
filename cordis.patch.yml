@@ -1,0 +1,7 @@
+# dsh-agnes-gen 的组合层：向当前 profile 插入一行插件。
+#
+# 配置项全部有默认值，不写 config 也能直接工作；
+# 需要覆盖时在下面追加 config: 段（示例见 README）。
+- insert:
+    - id: agnes-gen
+      name: dsh-agnes-gen
