@@ -9,19 +9,13 @@ Agnes AI 图像 / 视频生成插件，为 [DSH（DeepSeek Harness）](https://g
 
 ## DSH 版本适配
 
-本插件**同时适配 DSH `0.1.6-alpha.x` 与 `0.1.7-alpha.x` 两个版本线**，在运行期自动识别宿主提供的是哪一套设置接口，无需按版本装不同包。
+本插件**同时支持 DSH `0.1.6-alpha` 与 `0.1.7-alpha` 两条版本线**（含 `0.1.7-alpha.2`），安装同一个包即可，不用按版本挑。
 
-| | DSH `0.1.6-alpha.x` | DSH `0.1.7-alpha.x` |
-|---|---|---|
-| 状态 | ✅ 支持 | ✅ 支持 |
-| 声明方式 | `peerDependencies` 里的 `^0.1.6-alpha.2 \|\| ^0.1.7-alpha.1` | 同左 |
-| Host 设置服务 | `SettingsProvider`（有 `get(ns)` / `installSection`） | `SettingsForms`（无 `get` / `installSection`） |
-| 配置落点 | `settings.yaml` 的 `agnes-gen:` 分节 | profile `cordis.patch.yml` 的本插件条目 `config:` |
-| 配置界面 | 本插件自带的配置卡（含「校验 Key & 拉取模型」按钮） | DSH 从 `Config` 投影的**原生表单**（通用渲染，无该按钮） |
-| 配置生效 | 改完立即生效，无需重启 | 改完立即生效，无需重启 |
-| 两个生成工具 | ✅ 完全可用 | ✅ 完全可用 |
+- **两个生成工具在两条版本线上都完全可用。**
+- 只有**配置界面**的样子不同：`0.1.6` 用本插件自带的配置卡（多一个「校验 Key & 拉取模型」按钮），`0.1.7` 用 DSH 生成的原生表单。配置项名称与含义完全一致。
+- 配置**改完立即生效**，两条版本线都不用重启。
 
-> **为什么不写成 `>=0.1.6-alpha.2 <0.2.0`**：node-semver 规定预发布版本只被**同 `[major,minor,patch]` 且带预发布标识**的范围匹配。`0.1.7-alpha.1` 不满足 `>=0.1.6-alpha.2 <0.2.0`，所以必须给每个 patch 各写一个 `^` 分支。详见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
+> 安装时如果提示 peer 依赖不匹配，说明你的 DSH 版本不在上述范围内，请提 issue。
 
 > **依赖**：宿主 DSH 自带 `@deepseek-ai/dsh-tools` 与 `@deepseek-ai/schemastery`（本插件在 `peerDependencies` 里声明），无需手动安装。
 
@@ -37,43 +31,50 @@ Agnes AI 图像 / 视频生成插件，为 [DSH（DeepSeek Harness）](https://g
 
 ## 安装
 
-插件在三种 DSH 界面下均可运行：Web、Desktop、TUI。根据你使用的 profile 选对应命令安装。
+插件在三种 DSH 界面下均可运行：Web、Desktop、TUI。
 
-### Web（推荐，自带预构建产物）
+### 图形界面安装（推荐）
 
-```bash
-dsh plugin --profile web add dsh-agnes-gen
-dsh web
-```
+打开 DSH Web GUI → 侧栏「**插件**」→ 右上角「**添加插件**」，在输入框里填 `dsh-agnes-gen`，点「安装」。安装完成后点「**立即启用**」，插件即刻生效，不用重启。
 
-或从 GitHub 源码安装 Web 版：
+输入框接受三种形式，本插件用**包名**这一种即可：
 
-```bash
-dsh plugin --profile web add github:Ylhow06/dsh-agnes-gen
-dsh web
-```
+| 形式 | 本插件填什么 |
+|---|---|
+| 包名 | `dsh-agnes-gen` ← **推荐** |
+| GitHub 仓库地址 | `https://github.com/Ylhow06/dsh-agnes-gen` |
+| 本地目录 | 插件源码目录的绝对路径 |
 
-### Desktop（桌面版）
+> **卸载**：在「插件」页点开 `dsh-agnes-gen`，页头有卸载入口，会要求二次确认。
+>
+> **临时关掉**：卡片上的开关可以直接停用/启用，不用卸载。
 
-```bash
-dsh plugin --profile desktop add dsh-agnes-gen
-dsh --profile desktop
-```
+### 命令行安装
 
-### TUI（终端界面）
+按你使用的 profile 选对应命令：
 
-```bash
-dsh plugin --profile dsh-tui add dsh-agnes-gen
-dsh --profile dsh-tui
-```
+| 界面 | 命令 |
+|---|---|
+| Web | `dsh plugin --profile web add dsh-agnes-gen` |
+| Desktop | `dsh plugin --profile desktop add dsh-agnes-gen` |
+| TUI | `dsh plugin --profile dsh-tui add dsh-agnes-gen` |
 
-也可以用 Web GUI 的 **Plugins** 页面添加包名 / tarball 路径，或从本地 tarball 安装：
+装完启动：Web 用 `dsh web`，其余用 `dsh --profile <profile>`。
+
+也可以从 GitHub 源码装：`dsh plugin --profile web add github:Ylhow06/dsh-agnes-gen`
+
+或从本地 tarball 装：
 
 ```bash
 npm pack .
 dsh plugin --profile <profile> add ./dsh-agnes-gen-0.1.1.tgz
 ```
 
+### 卸载（命令行）
+
+```bash
+dsh plugin --profile <profile> remove dsh-agnes-gen
+```
 
 ### 申请 Agnes API Key
 
@@ -183,7 +184,7 @@ agnes-gen:
     outDir: ''
 ```
 
-> **0.1.7 上「配置界面不显示本插件」的排查**：0.1.7 的设置表单**只投影标了 `.volatile()` 的字段**——`dsh-settings` 的 `describe()` 对每个活动条目调用 `volatileForm(schema)`，返回 `undefined` 的条目会被**整条丢弃**。本插件的 `Config` 因此逐字段标了 `.volatile()`；如果你改动了 `lib/config-schema.js` 并去掉了这些标记，配置界面就会消失。实现细节见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
+> **0.1.7 上「配置界面不显示本插件」**：这通常说明 `Config` 的 `.volatile()` 标记被改动过，重新安装即可恢复。实现细节见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
 ### 完整配置项
 
@@ -287,22 +288,11 @@ npm run check        # 等价于 node selfcheck.mjs
 
 > 完整的开发与测试说明（本地安装的三种回路、`link:` 安装的注意事项、发布前建议）见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
-## 手动安装 / 卸载
-
-```bash
-# 打包安装
-npm pack .
-dsh plugin --profile <profile> add ./dsh-agnes-gen-0.1.1.tgz
-
-# 卸载
-dsh plugin --profile <profile> remove dsh-agnes-gen
-```
-
 ## 版本历史
 
 | 版本 | 内容 |
 |---|---|
-| `0.1.1` | 完善 DSH `0.1.7-alpha` 支持：配置界面可见（`Config` 逐字段 `.volatile()`）、配置实时生效、保存 / 清除 Key 的状态确认与标记刷新；整理文档中的版本适配说明 |
+| `0.1.1` | 完善 DSH `0.1.7-alpha` 支持：配置界面可见（`Config` 逐字段 `.volatile()`）、配置实时生效、保存 / 清除 Key 的状态确认与标记刷新；补充图形界面安装 / 卸载说明，精简版本适配章节 |
 | `0.1.0` | 首个版本：`agnes_image` / `agnes_video` 两个工具、跨进程 RPM 限流、429 退避、本地 ffmpeg 转 GIF、Web 配置卡、内置技能 |
 
 ## 协议
