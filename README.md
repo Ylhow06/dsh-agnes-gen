@@ -1,11 +1,29 @@
 # dsh-agnes-gen
 
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![version: 0.1.0](https://img.shields.io/badge/version-0.1.0-blue)
+![version: 0.1.1](https://img.shields.io/badge/version-0.1.1-blue)
 
 Agnes AI 图像 / 视频生成插件，为 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/deepseek-harness) 添加两个模型可见工具 `agnes_image` 与 `agnes_video`。内置跨进程 RPM 限流、429 退避，以及用本机 ffmpeg 把视频转成 GIF。
 
 这是一个 DSH **bundle 插件**，不是独立脚本。装进某个 profile 后，该 profile 的每个 session、每个 workspace 都能用。
+
+## DSH 版本适配
+
+本插件**同时适配 DSH `0.1.6-alpha.x` 与 `0.1.7-alpha.x` 两个版本线**，在运行期自动识别宿主提供的是哪一套设置接口，无需按版本装不同包。
+
+| | DSH `0.1.6-alpha.x` | DSH `0.1.7-alpha.x` |
+|---|---|---|
+| 状态 | ✅ 支持 | ✅ 支持 |
+| 声明方式 | `peerDependencies` 里的 `^0.1.6-alpha.2 \|\| ^0.1.7-alpha.1` | 同左 |
+| Host 设置服务 | `SettingsProvider`（有 `get(ns)` / `installSection`） | `SettingsForms`（无 `get` / `installSection`） |
+| 配置落点 | `settings.yaml` 的 `agnes-gen:` 分节 | profile `cordis.patch.yml` 的本插件条目 `config:` |
+| 配置界面 | 本插件自带的配置卡（含「校验 Key & 拉取模型」按钮） | DSH 从 `Config` 投影的**原生表单**（通用渲染，无该按钮） |
+| 配置生效 | 改完立即生效，无需重启 | 改完立即生效，无需重启 |
+| 两个生成工具 | ✅ 完全可用 | ✅ 完全可用 |
+
+> **为什么不写成 `>=0.1.6-alpha.2 <0.2.0`**：node-semver 规定预发布版本只被**同 `[major,minor,patch]` 且带预发布标识**的范围匹配。`0.1.7-alpha.1` 不满足 `>=0.1.6-alpha.2 <0.2.0`，所以必须给每个 patch 各写一个 `^` 分支。详见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
+
+> **依赖**：宿主 DSH 自带 `@deepseek-ai/dsh-tools` 与 `@deepseek-ai/schemastery`（本插件在 `peerDependencies` 里声明），无需手动安装。
 
 ## 功能
 
@@ -14,7 +32,7 @@ Agnes AI 图像 / 视频生成插件，为 [DSH（DeepSeek Harness）](https://g
 - ⏱ **429 退避**：自动等待服务端 `Retry-After`（上限 120 秒），不无意义重试。
 - 🎞 **本地 GIF 转换**：视频转 GIF 走本机 ffmpeg，纯本地、不额外计费；ffmpeg 缺失时自动降级为仅返回 mp4。
 - 🗝 **按站点管理密钥**：中国站 / 国际站两套 Key 分开保存、互不通用。
-- 🎛 **Web 配置卡**：在 DSH Web GUI 的「插件」页直接配置站点、API Key、RPM 预设、模型白名单、ffmpeg 路径。
+- 🎛 **图形配置界面**：在 DSH Web GUI 的「插件」页直接配置站点、API Key、RPM 预设、模型白名单、ffmpeg 路径（0.1.6 为自带配置卡，0.1.7 为原生表单）。
 - 📚 **内置技能**：随插件附带 `agnes-image` / `agnes-video` 两个技能，引导 AI 正确调用工具。
 
 ## 安装
@@ -53,10 +71,9 @@ dsh --profile dsh-tui
 
 ```bash
 npm pack .
-dsh plugin --profile <profile> add ./dsh-agnes-gen-0.1.0.tgz
+dsh plugin --profile <profile> add ./dsh-agnes-gen-0.1.1.tgz
 ```
 
-> **前置条件**：宿主 DSH 需提供 `@deepseek-ai/dsh-tools` 与 `@deepseek-ai/schemastery`（本插件在 `peerDependencies` 里声明）。DSH `0.1.6-alpha.x` **或** `0.1.7-alpha.x` 都自带这两个包，无需手动安装；本插件同时兼容这两个版本线。
 
 ### 申请 Agnes API Key
 
@@ -67,16 +84,18 @@ dsh plugin --profile <profile> add ./dsh-agnes-gen-0.1.0.tgz
 | 中国站 | `cn`（默认） | <https://platform.agnes-ai.cn/settings/apiKeys> | `https://api.agnes-ai.cn` |
 | 国际站 | `intl` | <https://platform.agnes-ai.com/settings/apiKeys> | `https://apihub.agnes-ai.com` |
 
-### 在 Web 配置卡填 Key
+### 在图形界面填 Key
 
-打开 DSH Web GUI → 侧栏「插件」→ 点开 `dsh-agnes-gen` 卡片。最上面是「Agnes 站点」下拉框，下面是**当前那一站**的 Key 输入框：
+打开 DSH Web GUI → 侧栏「插件」→ 点开 `dsh-agnes-gen`。界面顶部是「Agnes 站点」下拉框，下面是**当前那一站**的 Key 输入框：
 
 1. 先选对站点（中国站 / 国际站）；
 2. 填对应那一站的 API Key；
-3. （可选）点「校验 Key & 拉取模型」，即刻验证 Key 有效并从 `/v1/models` 导入当前站的模型白名单；
+3. （可选，**仅 0.1.6**）点「校验 Key & 拉取模型」，即刻验证 Key 有效并从 `/v1/models` 导入当前站的模型白名单；
 4. 点「保存」。
 
 > ⚠️ **两站的 Key 不通用。** 中国站与国际站是两套独立服务、独立令牌体系，拿国际站的 Key 打国内站只会得到 401。界面按站点只显示对应那一个输入框，两站 Key 各存一份、各用一份。
+>
+> ⚠️ **`site` 与 Key 必须匹配。** 选了中国站就要填 `apiKeyCn`，选了国际站就要填 `apiKeyIntl`——填错一边会直接报「未找到 Agnes API Key（xx站）」。0.1.7 的原生表单没有「校验 Key」按钮，可用下面的诊断路由确认 Key 是否已就位。
 
 ### 开始生成
 
@@ -131,29 +150,44 @@ agnes_video(prompt="夜晚森林中三只猫组成微型铜管乐队向前行进
 
 ## 配置
 
-配置分**两层**，运行时可改：
+**推荐用图形界面**：DSH Web GUI → 侧栏「插件」→ 点开 `dsh-agnes-gen`。配置写在哪里取决于你的 DSH 版本（见 [DSH 版本适配](#dsh-版本适配)）：
 
-| 层 | 存放位置 | 改动生效方式 |
+| DSH 版本 | 界面 | 落点 |
 |---|---|---|
-| 用户层 | DSH 的 `settings.yaml` 中 `agnes-gen:` 分节 | **立即生效**，无需重启；工具每次执行都重新读取 |
-| 组合层 | profile 的 `cordis.patch.yml` 中该行 `config:` | 按 profile 的 HMR 生效 |
+| `0.1.6-alpha.x` | 本插件自带的配置卡 | DSH 的 `settings.yaml` 中 `agnes-gen:` 分节 |
+| `0.1.7-alpha.x` | DSH 生成的原生表单 | profile 的 `cordis.patch.yml` 中本插件条目的 `config:` |
 
-> 日常使用**推荐用 Web 配置卡**，它写的就是用户层。也可以直接编辑 `settings.yaml`：
-> ```yaml
-> agnes-gen:
->   site: cn                  # Agnes 站点：cn（中国站）| intl（国际站）
->   apiKeyCn: sk-...          # 中国站的 Key（仅 site: cn 时使用）；机密字段
->   apiKeyIntl: sk-...        # 国际站的 Key（仅 site: intl 时使用）；机密字段
->   plan: free                # 密钥档位预设：free | token-plan
->   rateLimit: true
->   outDir: ''
-> ```
+两者都**改完立即生效，无需重启**。也可以直接编辑文件。
 
-> **DSH 0.1.7 兼容说明**：`0.1.7-alpha` 把 DSH 的设置系统换成「Profile 插件配置」模型，不再提供 `settingsScope` 自定义配置卡和 `settings.yaml` 用户层。此版本下插件**自动改用 DSH 从 `Config` schema 生成的原生设置表单**：所有字段（两站 Key、站点、模型列表、RPM、ffmpeg、outDir）照常出现、写入当前 profile 的 `cordis.patch.yml` 并立即生效；仅少一个「校验 Key & 拉取模型」专用按钮，其余行为一致。两个生成工具在 `0.1.6` 与 `0.1.7` 下都完全可用。
+**DSH 0.1.6** — 编辑 DSH 的 `settings.yaml`：
+
+```yaml
+agnes-gen:
+  site: cn
+  apiKeyCn: sk-...
+  plan: free
+  rateLimit: true
+  outDir: ''
+```
+
+**DSH 0.1.7** — 编辑当前 profile 的 `cordis.patch.yml`：
+
+```yaml
+- id: agnes-gen
+  name: dsh-agnes-gen
+  config:
+    site: cn
+    apiKeyCn: sk-...
+    plan: free
+    rateLimit: true
+    outDir: ''
+```
+
+> **0.1.7 上「配置界面不显示本插件」的排查**：0.1.7 的设置表单**只投影标了 `.volatile()` 的字段**——`dsh-settings` 的 `describe()` 对每个活动条目调用 `volatileForm(schema)`，返回 `undefined` 的条目会被**整条丢弃**。本插件的 `Config` 因此逐字段标了 `.volatile()`；如果你改动了 `lib/config-schema.js` 并去掉了这些标记，配置界面就会消失。实现细节见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
 ### 完整配置项
 
-默认值**全项目只有一处来源**（`lib/config-schema.js` 里的 Schemastery `.default(...)`），所以下表默认值就是「恢复默认」回到的值。
+默认值**全项目只有一处来源**（`lib/config-schema.js` 里的 Schemastery `.default(...)`），所以下表默认值就是「恢复默认」回到的值。字段名在两个 DSH 版本下完全一致，只是落点不同。
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
@@ -174,7 +208,7 @@ agnes_video(prompt="夜晚森林中三只猫组成微型铜管乐队向前行进
 | `imageModels<Site>` | `["agnes-image-2.5-flash"]` | 该站的**可选**图像模型集（白名单） |
 | `videoModels<Site>` | `["agnes-video-2.5-flash"]` | 该站的**可选**视频模型集（白名单） |
 
->`<Site>` ∈ `Cn` / `Intl`。以下三项不在配置卡、也不参与「恢复默认」，只能经组合层（`cordis.patch.yml` 的 `config:`）设置：`imageTimeoutMs`（默认 300000，图像请求超时）、`videoTimeoutMs`（默认 1800000，视频任务超时）、`videoPollMs`（默认 2500，视频轮询间隔）。
+>`<Site>` ∈ `Cn` / `Intl`。以下三项**不在配置界面、也不参与「恢复默认」**，只能手工编辑配置文件（0.1.6 写进 `settings.yaml` 的 `agnes-gen:` 分节，0.1.7 写进 profile `cordis.patch.yml` 的条目 `config:`）：`imageTimeoutMs`（默认 300000，图像请求超时）、`videoTimeoutMs`（默认 1800000，视频任务超时）、`videoPollMs`（默认 2500，视频轮询间隔）。
 
 ### 自定义模型
 
@@ -182,12 +216,12 @@ agnes_video(prompt="夜晚森林中三只猫组成微型铜管乐队向前行进
 
 - **下拉即生效**：选中哪项，`model` 参数不传时默认就用哪项。
 - **自定义**：下拉选「自定义…」可输入任意模型 ID。
-- **一键导入**：填好 API Key 后点 Key 框旁的「校验 Key & 拉取模型」，自动从 `/v1/models` 导入当前站模型并按类型（图像 / 视频）分类进白名单。
+- **一键导入（仅 0.1.6）**：填好 API Key 后点 Key 框旁的「校验 Key & 拉取模型」，自动从 `/v1/models` 导入当前站模型并按类型（图像 / 视频）分类进白名单。0.1.7 的原生表单没有这个按钮，模型集需手动填写（`imageModels<Site>` / `videoModels<Site>`）。
 - **白名单校验**：`model` 参数须落在当前站白名单内，取集外的 ID 会立即报错并列出可选值。
 
 ### 一键恢复默认
 
-Web 配置卡底部的「恢复默认」会清除用户层里所有覆盖，让字段重新继承组合层与出厂默认值：
+配置界面底部的「恢复默认」会清除用户层里所有覆盖，让字段重新继承组合层与出厂默认值：
 
 - **两段式确认**：第一下只变成「确认恢复默认？」，第二下才提交；任何编辑都会撤销。
 - **一次原子写入**：所有 `unset` 在同一个 `mutate` 里提交，共享 revision 栅栏。
@@ -219,14 +253,14 @@ Agnes 只公布 **RPM**（每分钟请求数），没有 RPS 概念；限制按*
 
 `gif=true` 时需要本机 ffmpeg：
 
-- 优先用配置里的 `ffmpegPath`（Web 配置卡可直接填）；
+- 优先用配置里的 `ffmpegPath`（图形界面可直接填）；
 - 留空则按 `PATH` 里的 `ffmpeg` 查找。
 
 GIF 用两遍调色板法（`palettegen` + `paletteuse`），画质优于单遍。**ffmpeg 不可用时不会导致工具调用失败**：视频照常生成并返回本地 mp4，`gif` 字段为空串，带一个 `warning` 字段说明原因。
 
 ## 诊断
 
-插件注册了两条只读路由（仅本机回环可访问），供排障：
+插件注册了两条只读路由（仅本机回环可访问），**两个 DSH 版本下都可用**，供排障：
 
 - `GET /plugins/dsh-agnes-gen/status`：返回 Key 与 ffmpeg 可用性、当前生效档位与逐档位 RPM。**从不返回密钥明文**，只报告「是否已配置」。
 - `GET /plugins/dsh-agnes-gen/check`：实际调一次 `GET /v1/models` 校验 Key 有效性，并返回按类型分类的模型清单。同样不返回密钥明文。
@@ -235,10 +269,12 @@ GIF 用两遍调色板法（`palettegen` + `paletteuse`），画质优于单遍�
 curl http://127.0.0.1:3080/plugins/dsh-agnes-gen/status
 ```
 
+> 0.1.7 的原生表单没有「校验 Key & 拉取模型」按钮，用 `/check` 可以起到同样作用。
+
 ## 安全说明
 
 - `apiKeyCn` / `apiKeyIntl`（及历史字段 `apiKey`）在 schema 里都带 secret 标记，值会从**每个**对外响应中剥离，只在 descriptor 的 `secrets` 里留下 `{ path, set }`。
-- 插件**不读环境变量、不读任何凭据文件**。唯一正确的配置 Key 的方式就是在配置卡 / `settings.yaml` 里填 `apiKeyCn` / `apiKeyIntl`。没填就直接报错，并指引去对应站点申请。
+- 插件**不读环境变量、不读任何凭据文件**。唯一正确的配置 Key 的方式就是在图形界面里填 `apiKeyCn` / `apiKeyIntl`，或直接编辑上面 [配置](#配置) 一节说的那个文件。没填就直接报错，并指引去对应站点申请。
 - 插件不打印密钥、不把密钥写进返回值或日志。
 
 ## 开发与自检
@@ -256,11 +292,18 @@ npm run check        # 等价于 node selfcheck.mjs
 ```bash
 # 打包安装
 npm pack .
-dsh plugin --profile <profile> add ./dsh-agnes-gen-0.1.0.tgz
+dsh plugin --profile <profile> add ./dsh-agnes-gen-0.1.1.tgz
 
 # 卸载
 dsh plugin --profile <profile> remove dsh-agnes-gen
 ```
+
+## 版本历史
+
+| 版本 | 内容 |
+|---|---|
+| `0.1.1` | 完善 DSH `0.1.7-alpha` 支持：配置界面可见（`Config` 逐字段 `.volatile()`）、配置实时生效、保存 / 清除 Key 的状态确认与标记刷新；整理文档中的版本适配说明 |
+| `0.1.0` | 首个版本：`agnes_image` / `agnes_video` 两个工具、跨进程 RPM 限流、429 退避、本地 ffmpeg 转 GIF、Web 配置卡、内置技能 |
 
 ## 协议
 

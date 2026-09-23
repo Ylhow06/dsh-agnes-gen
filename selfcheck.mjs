@@ -108,7 +108,28 @@ check("有 description", typeof pkg.description === "string" && pkg.description.
 check("有 keywords（含 dsh-plugin）", Array.isArray(pkg.keywords) && pkg.keywords.includes("dsh-plugin"));
 check("files 白名单非空", Array.isArray(pkg.files) && pkg.files.length > 0);
 check("engines.node 已声明", typeof pkg.engines?.node === "string");
-check("版本是 0.1.0（尚未发布）", pkg.version === "0.1.0", pkg.version);
+// 版本只校验格式，不钉死具体数字——否则每次发版都要改测试。
+check("version 是合法 semver", /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(pkg.version ?? ""), String(pkg.version));
+
+// README 里的版本 badge 与 tarball 文件名都写死了版本号，发版时最容易漏改。
+// 这条把它们钉在一起，避免出现「package.json 是 0.1.1、README 还写着 0.1.0」。
+{
+  const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+  check(
+    "README 的 version badge 与 package.json 一致",
+    readme.includes(`badge/version-${pkg.version}-`),
+    pkg.version,
+  );
+  check(
+    "README 的 tarball 安装示例与 package.json 一致",
+    readme.includes(`dsh-agnes-gen-${pkg.version}.tgz`),
+    pkg.version,
+  );
+  check(
+    "README 声明了 DSH 版本适配",
+    /## DSH 版本适配/.test(readme) && readme.includes("0.1.6-alpha") && readme.includes("0.1.7-alpha"),
+  );
+}
 
 // 浏览器半侧声明：platform + ./client 导出 + 文件存在。
 const clientRel = pkg.dsh?.client?.platform === "web" ? pkg.exports?.["./client"] : undefined;
@@ -318,7 +339,9 @@ check("信封是 { uid, refs } 形状", Boolean(envelope) && typeof envelope.uid
 check("根节点是 object", rootNode?.type === "object", String(rootNode?.type));
 
 // 活节点：redactSecrets() 遍历的是它们，不是 toJSON 的结果。
-check("schema 暴露活节点 dict（机密剥离依赖它）", installedSection?.schema?.dict !== undefined);
+// meta 也必须从活节点读——toJSON() 的信封不携带 volatile / default。
+const liveRoot = installedSection?.schema;
+check("schema 暴露活节点 dict（机密剥离依赖它）", liveRoot?.dict !== undefined);
 const secretNode = installedSection?.schema?.dict?.apiKeyCn;
 check("apiKeyCn 标记为 secret（值不会出现在任何响应里）", secretNode?.meta?.role === "secret", String(secretNode?.meta?.role));
 
@@ -327,18 +350,34 @@ check("apiKeyCn 标记为 secret（值不会出现在任何响应里）", secret
 // 这是正常的；这里只要求 **有 default 的字段** 一定出现。
 const fieldKeys = Object.keys(rootNode?.dict ?? {});
 check("信封声明了字段", fieldKeys.length > 0, fieldKeys.join(","));
+
+// 所有字段都标了 volatile（0.1.7 设置表单只投影 volatile 字段，否则条目会被
+// describe() 整条剔除）。代价是 volatile 字段**求值时返回引用对象而非值**：
+//   installedSection.schema({}) -> { site: {}, apiKeyCn: {}, ... }  // 全是空壳
+// 因此默认值改从 meta.default 读（见 config-schema.js 的 defaultConfig()）。
+// 这里断言新语义，避免有人「修好」成求值读法后又把配置卡弄丢。
+check(
+  "所有字段都标了 volatile（0.1.7 配置卡可见的前提）",
+  fieldKeys.every((k) => liveRoot?.dict?.[k]?.meta?.volatile === true),
+  fieldKeys.filter((k) => liveRoot?.dict?.[k]?.meta?.volatile !== true).join(","),
+);
 const resolvedDefaults = installedSection.schema({});
 check(
-  "三个密钥字段解析后都不出现（未配置即缺省）",
-  resolvedDefaults.apiKey === undefined &&
-    resolvedDefaults.apiKeyCn === undefined &&
-    resolvedDefaults.apiKeyIntl === undefined,
+  "volatile 字段求值返回引用对象而非值（新语义，故默认值走 meta.default）",
+  typeof resolvedDefaults === "object" && resolvedDefaults.site !== "cn",
+  `site=${JSON.stringify(resolvedDefaults.site)}`,
+);
+check(
+  "三个密钥字段都没有 schema 默认值（未配置即缺省）",
+  liveRoot?.dict?.apiKey?.meta?.default === undefined &&
+    liveRoot?.dict?.apiKeyCn?.meta?.default === undefined &&
+    liveRoot?.dict?.apiKeyIntl?.meta?.default === undefined,
 );
 const expectedDefaultKeys = fieldKeys.filter((k) => !k.startsWith("apiKey"));
 check(
-  "所有非机密字段都能解析出默认值",
-  expectedDefaultKeys.every((k) => resolvedDefaults[k] !== undefined),
-  expectedDefaultKeys.filter((k) => resolvedDefaults[k] === undefined).join(","),
+  "所有非机密字段都在 schema 里声明了默认值",
+  expectedDefaultKeys.every((k) => liveRoot?.dict?.[k]?.meta?.default !== undefined),
+  expectedDefaultKeys.filter((k) => liveRoot?.dict?.[k]?.meta?.default === undefined).join(","),
 );
 
 // 严格语义：非法值必须抛错，而不是被静默改写成默认值。
@@ -361,9 +400,9 @@ try {
 }
 check("非法枚举值抛错", /plan/.test(strictEnum), strictEnum);
 
-// 严格语义的后果必须被认识到：一份手改坏的 settings.yaml 会让 register() 抛错。
-// index.js 把它降级成 logger.warn，插件行照常加载、工具照常可用，只是配置卡消失。
-// 这条用真实 Provider 单独验证过（见 README「验证」一节）。
+// 严格语义的后果必须被认识到：一份手改坏的配置（0.1.6 的 settings.yaml、
+// 或 0.1.7 profile patch 的 config:）会让 register() 抛错。index.js 把它降级成
+// logger.warn，插件行照常加载、工具照常可用，只是配置界面不可用。
 const badSection = { imageRpm1K: -5 };
 let registerWouldThrow = false;
 try {
@@ -375,12 +414,15 @@ check("非法 user 层会让 schema 求值抛错（注册失败→降级为 warn
 
 // 未声明的键：Schemastery 会**保留**在解析结果里，但不会声明进 dict。
 // 实测行为（不是猜测）：`Config({ nope: 1 })` → `{ ...defaults, nope: 1 }`。
-// 也就是说 settings.yaml 里拼错的键名不会报错、也不会被表单渲染出来，
+// 也就是说配置文件里拼错的键名不会报错、也不会被表单渲染出来，
 // 但会留在 resolved 值里。对我们无害（只读已知键），但值得记下来。
+//
+// 注意：字段标了 volatile 之后，已知字段在求值结果里是**引用对象**（空壳），
+// 所以这条只断言「未声明键被保留」，不断言已知字段的值——后者由
+// defaultConfig()（读 meta.default）负责，另有断言覆盖。
 const withExtra = installedSection.schema({ nope: 1 });
 check("未声明的键不会被声明进 schema", rootNode?.dict?.nope === undefined);
 check("未声明的键会保留在解析结果里（实测行为）", withExtra.nope === 1);
-check("未声明的键不影响已知字段的默认值", withExtra.plan === "free" && withExtra.gifWidth === 480);
 
 // ---- 4b. RPM 预设 ----
 const { effectiveLimits, PLANS, PLAN_VALUES, defaultConfig, publicDefaults } = await import(
@@ -515,23 +557,29 @@ check(
 );
 
 // ---- 4c. 单一份默认配置 ----
-// 现在默认值只写在真实 Schemastery 的 `.default(...)` 里，defaultConfig()
-// 直接求值 `Config({})` 得到，index.js 的 DEFAULT_CONFIG 再由它拼出。
+// 默认值只写在真实 Schemastery 的 `.default(...)` 里，defaultConfig() 从
+// schema 的 meta.default 读出（因为字段全标了 volatile，求值只会得到引用对象
+// 空壳，见 config-schema.js 顶部注释）。index.js 的 DEFAULT_CONFIG 再由它拼出。
 // 这里把「三者同源」钉死：任何一处另抄一份数字都会被这条抓住。
-const schemaDefaults = installedSection.schema({});
+//
+// 独立的期望值来源：直接遍历 schema 的活节点读 meta.default，不调用
+// defaultConfig()——否则就是拿实现验证实现，漂移照样抓不住。
+const schemaDefaults = {};
+for (const key of fieldKeys) {
+  const fallback = liveRoot?.dict?.[key]?.meta?.default;
+  if (fallback !== undefined) schemaDefaults[key] = fallback;
+}
 // 数组字段用深比较（Object.is 按引用，两处各自生成的新数组会误判漂移）。
-const driftedKeys = fieldKeys.filter(
-  (key) =>
-    !key.startsWith("apiKey") &&
-    JSON.stringify(mod.DEFAULT_CONFIG[key]) !== JSON.stringify(schemaDefaults[key]),
+const driftedKeys = Object.keys(schemaDefaults).filter(
+  (key) => JSON.stringify(mod.DEFAULT_CONFIG[key]) !== JSON.stringify(schemaDefaults[key]),
 );
 check(
-  "DEFAULT_CONFIG 的每个 schema 字段都等于 schema 默认值（单一来源）",
+  "DEFAULT_CONFIG 的每个 schema 字段都等于 schema 声明的默认值（单一来源）",
   driftedKeys.length === 0,
   driftedKeys.map((k) => `${k}: ${JSON.stringify(mod.DEFAULT_CONFIG[k])} vs ${JSON.stringify(schemaDefaults[k])}`).join("; "),
 );
 check(
-  "defaultConfig() 就是 schema 的空输入求值结果",
+  "defaultConfig() 等于从 schema 的 meta.default 读出的默认值",
   JSON.stringify(defaultConfig()) === JSON.stringify(schemaDefaults),
   JSON.stringify(defaultConfig()),
 );
@@ -824,31 +872,36 @@ check(
 
 const slotCalls = [];
 let cardComponent = null;
+// 真实 runner 的 dynamic ctx 只通过 `ctx.get(name)` 暴露服务（直接读
+// `ctx.settingsScope` 要求它在 inject 里声明过）。这里照实建模：
+// 0.1.6 语义下 get("settingsScope") 返回服务，get("slots") 返回 slots。
+const scopeService = {
+  bind: () => ({
+    getSnapshot: () => ({ status: "loading", value: undefined, user: {}, base: {}, revision: 0, writable: true, mode: "host" }),
+    subscribe: () => () => {},
+    set: async () => {},
+    unset: async () => {},
+    mutate: async () => {},
+  }),
+};
+const slotsService = {
+  inject: (name, cb) => {
+    slotCalls.push(`inject:${name}`);
+    cb();
+  },
+  register: (options, component) => {
+    slotCalls.push(`register:${options.name}:${options.key}`);
+    cardComponent = component;
+    return () => {};
+  },
+};
 const clientCtx = {
   effect: (fn) => {
     const disposer = fn();
     return typeof disposer === "function" ? disposer : () => {};
   },
-  settingsScope: {
-    bind: () => ({
-      getSnapshot: () => ({ status: "loading", value: undefined, user: {}, base: {}, revision: 0, writable: true, mode: "host" }),
-      subscribe: () => () => {},
-      set: async () => {},
-      unset: async () => {},
-      mutate: async () => {},
-    }),
-  },
-  slots: {
-    inject: (name, cb) => {
-      slotCalls.push(`inject:${name}`);
-      cb();
-    },
-    register: (options, component) => {
-      slotCalls.push(`register:${options.name}:${options.key}`);
-      cardComponent = component;
-      return () => {};
-    },
-  },
+  get: (name) => (name === "settingsScope" ? scopeService : name === "slots" ? slotsService : undefined),
+  slots: slotsService,
 };
 let applyError = "";
 try {
@@ -863,6 +916,111 @@ check(
   slotCalls.join(" | "),
 );
 check("通过 ctx.slots.inject 延迟注册（等待 slot 声明）", slotCalls.some((c) => c.startsWith("inject:plugins.bundle.config")));
+
+// ---- 回归：0.1.7 启动失败（Failed to load plugins / pending settingsScope）----
+// 把 settingsScope 写进 inject 时，Loader 会把「声明了却拿不到」的服务当成
+// 激活依赖，插件永久 pending，web boot 直接报 "1 entry did not activate"。
+// 所以 inject 里绝不能出现 settingsScope。
+check(
+  "inject 不含 settingsScope（否则 0.1.7 永久 pending 起不来）",
+  !clientExports.inject?.includes("settingsScope"),
+  JSON.stringify(clientExports.inject),
+);
+check("inject 仍声明 slots（两版都有）", clientExports.inject?.includes("slots"), JSON.stringify(clientExports.inject));
+
+// 完全拿不到配置面（两版都缺席）时：不注册卡、不抛错，插件正常激活。
+{
+  const bareSlotCalls = [];
+  const bareCtx = {
+    effect: (fn) => {
+      const disposer = fn();
+      return typeof disposer === "function" ? disposer : () => {};
+    },
+    get: () => undefined,
+    slots: {
+      inject: () => {},
+      register: (options) => {
+        bareSlotCalls.push(options.name);
+        return () => {};
+      },
+    },
+  };
+  let bareErr = "";
+  try {
+    clientExports.apply(bareCtx);
+  } catch (err) {
+    bareErr = err.message;
+  }
+  check("无配置面时 apply() 不抛错", bareErr === "", bareErr);
+  check("无配置面时不注册卡槽位（Host 侧不受影响）", bareSlotCalls.length === 0, bareSlotCalls.join(","));
+}
+
+// 0.1.7 语义：settingsScope 缺席、configForms 在场 → 走 configForms.get(entryId)
+// 拿到配置面，卡片照常注册（这是 0.1.7 上配置 UI 的来源）。
+{
+  const v17Asked = [];
+  const formSnapshot = {
+    status: "ready",
+    value: { ...pubDefaults },
+    base: {},
+    user: {},
+    revision: 7,
+    writable: true,
+    mode: "host",
+  };
+  const form = {
+    getSnapshot: () => formSnapshot,
+    subscribe: () => () => {},
+    set: async () => true,
+    unset: async () => true,
+    mutate: async () => true,
+  };
+  const v17SlotCalls = [];
+  const v17Ctx = {
+    effect: (fn) => {
+      const disposer = fn();
+      return typeof disposer === "function" ? disposer : () => {};
+    },
+    get: (name) => {
+      v17Asked.push(name);
+      if (name === "configForms") {
+        return {
+          get: (entryId) => {
+            v17Asked.push(`entryId:${entryId}`);
+            // 只有正确的条目 id 才给到表单。
+            return entryId === "agnes-gen" ? form : undefined;
+          },
+        };
+      }
+      return undefined; // settingsScope 在 0.1.7 不存在
+    },
+    slots: {
+      inject: (name, cb) => cb(),
+      register: (options, component) => {
+        v17SlotCalls.push(options.name);
+        return () => {};
+      },
+    },
+  };
+  let v17Err = "";
+  try {
+    clientExports.apply(v17Ctx);
+  } catch (err) {
+    v17Err = err.message;
+  }
+  check("0.1.7 下 apply() 不抛错", v17Err === "", v17Err);
+  check(
+    "0.1.7 经 configForms 注册配置卡",
+    v17SlotCalls.includes("plugins.bundle.config"),
+    v17SlotCalls.join(","),
+  );
+  check(
+    "0.1.7 用插件条目 id 取表单（实测 agnes-gen）",
+    v17Asked.includes("entryId:agnes-gen"),
+    v17Asked.join(" | "),
+  );
+  check("0.1.7 探测 configForms 服务", v17Asked.includes("configForms"), v17Asked.join(" | "));
+}
 
 // 组件要能为两种视图渲染出东西——这是插件页唯一会做的事。
 let viewError = "";
@@ -933,30 +1091,33 @@ let realCard = null;
 let controllerError = "";
 let realController = null;
 try {
+  const scope2 = {
+    bind: () => ({
+      getSnapshot: () => clientScope.snapshot(),
+      subscribe: () => () => {},
+      set: async (field, value) => clientScope.applyOps([{ op: "set", path: [field], value }]),
+      unset: async (field) => clientScope.applyOps([{ op: "unset", path: [field] }]),
+      mutate: async (ops) => {
+        clientScope.mutateCalls.push(ops);
+        clientScope.applyOps(ops);
+      },
+    }),
+  };
+  const slots2 = {
+    inject: (name, cb) => cb(),
+    register: (options, component) => {
+      realCard = component;
+      return () => {};
+    },
+  };
   const ctx2 = {
     effect: (fn) => {
       const disposer = fn();
       return typeof disposer === "function" ? disposer : () => {};
     },
-    settingsScope: {
-      bind: () => ({
-        getSnapshot: () => clientScope.snapshot(),
-        subscribe: () => () => {},
-        set: async (field, value) => clientScope.applyOps([{ op: "set", path: [field], value }]),
-        unset: async (field) => clientScope.applyOps([{ op: "unset", path: [field] }]),
-        mutate: async (ops) => {
-          clientScope.mutateCalls.push(ops);
-          clientScope.applyOps(ops);
-        },
-      }),
-    },
-    slots: {
-      inject: (name, cb) => cb(),
-      register: (options, component) => {
-        realCard = component;
-        return () => {};
-      },
-    },
+    // 同上：真实 runner 用 ctx.get(name) 取服务。
+    get: (name) => (name === "settingsScope" ? scope2 : name === "slots" ? slots2 : undefined),
+    slots: slots2,
   };
   clientExports.apply(ctx2);
   realController = realCard({ view: "page" }).props.controller;
@@ -1310,6 +1471,450 @@ if (checkRoute) {
     "/check 用请求带的站点/key 校验（intl 从 body 带入，不回落已保存的 cn）",
     parsed?.configured === true && parsed?.site === "intl",
     JSON.stringify(parsed),
+  );
+}
+
+// ---- 4j. 0.1.7 的真实行为：机密字段被抹掉 + mutate 返回 boolean ----
+//
+// 这一段对应一次真实 bug：0.1.7 下保存 API Key 会误报
+// 「保存未生效：国际站 API Key。配置可能已被其它界面修改」——写入其实成功了。
+//
+// 两个真实事实叠在一起才会触发：
+//   1. `redactSecrets()` 把 `role('secret')` 字段从下发的 user 层里**整个删掉**
+//      （实测：override 里有 apiKeyIntl，浏览器收到的 user 只有 site/plan/gifWidth），
+//      所以 `userKeys()` 对机密字段永远回答「没有」；
+//   2. 0.1.7 的 `mutate()` 返回 boolean（false = Host 拒绝），比回读权威得多。
+//
+// 旧代码只看回读、且对机密字段判定「userKeys 里没有 = 未生效」，
+// 于是每次保存 Key 都必然报错。下面的 mock **刻意复现事实 1**（user 里不含机密键），
+// 上一段的 clientScope 则相反（user 里含 apiKeyCn），所以那段测不出这个 bug。
+{
+  // 0.1.7 语义的 Host：接受写入，但下发的 user 层里机密字段被抹掉。
+  const host = {
+    stored: {},          // Host 真正存下的覆盖层（含机密值）
+    accept: true,        // mutate 的返回值：true = Host 接受
+    snapshot() {
+      const visible = { ...this.stored };
+      for (const k of ["apiKey", "apiKeyCn", "apiKeyIntl"]) delete visible[k]; // redactSecrets
+      return {
+        status: "ready",
+        value: { ...pubDefaults, ...visible },
+        base: {},
+        user: visible,   // 机密字段不在其中——这是浏览器真实拿到的样子
+        revision: 1,
+        writable: true,
+        mode: "host",
+      };
+    },
+  };
+
+  let card017 = null;
+  const controller017 = { status: { overriddenKeys: [] } };
+  const scope017 = {
+    getSnapshot: () => host.snapshot(),
+    subscribe: () => () => {},
+    set: async () => true,
+    unset: async () => true,
+    // 0.1.7：Host 接受则写入并返回 true；拒绝则原样返回 false 且不写。
+    mutate: async (ops) => {
+      if (!host.accept) return false;
+      for (const op of ops) {
+        if (op.op === "unset") delete host.stored[op.path[0]];
+        else host.stored[op.path[0]] = op.value;
+      }
+      return true;
+    },
+  };
+  const slots017 = { inject: (n, cb) => cb(), register: (o, c) => { card017 = c; return () => {}; } };
+  const ctx017 = {
+    effect: (fn) => { const d = fn(); return typeof d === "function" ? d : () => {}; },
+    // 0.1.7：configForms 存在，settingsScope 不存在。
+    get: (n) => (n === "configForms" ? { get: () => scope017 } : n === "slots" ? slots017 : undefined),
+    slots: slots017,
+  };
+
+  let buildErr = "";
+  let ctl = null;
+  try {
+    clientExports.apply(ctx017);
+    ctl = card017({ view: "page" }).props.controller;
+  } catch (err) {
+    buildErr = err.message;
+  }
+  check("0.1.7 经 configForms 能建出卡片", ctl !== null, buildErr);
+
+  if (ctl) {
+    ctl.status = { overriddenKeys: [] };
+
+    // 保存一个机密字段（模拟「拉取模型后保存」）。
+    ctl.drafts.clear();
+    ctl.failed = "";
+    ctl.notice = "";
+    ctl.edit("apiKeyIntl", "sk-intl-new");
+    await ctl.save();
+    check(
+      "0.1.7 保存 API Key：Host 接受时不得误报「未生效」",
+      ctl.failed === "" && /已保存/.test(ctl.notice),
+      `notice=${JSON.stringify(ctl.notice)} failed=${JSON.stringify(ctl.failed)}`,
+    );
+    check(
+      "0.1.7 保存 API Key 确实写进了 Host",
+      host.stored.apiKeyIntl === "sk-intl-new",
+      JSON.stringify(host.stored),
+    );
+
+    // Host 明确拒绝时仍必须报错，不能假报成功。
+    host.accept = false;
+    ctl.drafts.clear();
+    ctl.failed = "";
+    ctl.notice = "";
+    ctl.edit("apiKeyIntl", "sk-intl-x");
+    await ctl.save();
+    check(
+      "0.1.7 Host 拒绝写入时仍报错（不假报成功）",
+      ctl.failed !== "" && ctl.notice === "",
+      `notice=${JSON.stringify(ctl.notice)} failed=${JSON.stringify(ctl.failed)}`,
+    );
+    host.accept = true;
+
+    // 非机密字段在 0.1.7 下仍要被回读核对（mutate 接受 ≠ 值一定按预期落地）。
+    ctl.drafts.clear();
+    ctl.failed = "";
+    ctl.notice = "";
+    ctl.edit("gifWidth", "320");
+    await ctl.save();
+    check(
+      "0.1.7 非机密字段保存成功且生效值已变",
+      ctl.failed === "" && /已保存/.test(ctl.notice),
+      `notice=${JSON.stringify(ctl.notice)} failed=${JSON.stringify(ctl.failed)}`,
+    );
+
+    // 机密字段不该因为「user 层看不见」而被 verify 判成未生效。
+    check(
+      "verifyVisible 跳过机密字段（它们永远不在下发的 user 层里）",
+      typeof ctl.verifyVisible === "function" && ctl.verifyVisible([{ op: "set", path: ["apiKeyIntl"], value: "x" }]).length === 0,
+    );
+  }
+}
+
+// ---- 4k. 行配置里的 volatile 引用空壳必须被清洗 ----
+//
+// 对应一次真实故障：给 Config 全字段加 `.volatile()` 之后，agnes_image 每次调用
+// 都报 `The "paths[1]" argument must be of type string. Received an instance of Object`。
+//
+// 成因：volatile 字段**求值返回引用对象而不是值**（`Config({}).outDir` 是 `{}`），
+// 若上游某一环把求值结果当作行配置传进来，`cfg.outDir` 就成了对象，随后
+// `path.resolve(cwd, {})` 抛出这个与「生成图片」毫无关系的类型错误。
+//
+// 这里直接验证 `apply()` 会丢掉这类值并回落到默认值。
+{
+  const pollutionTools = new Map();
+  const warns = [];
+  const pollutionCtx = {
+    logger: () => ({ info() {}, warn: (m) => warns.push(String(m)), error() {}, debug() {} }),
+    effect: (fn) => { const d = fn(); return typeof d === "function" ? d : () => {}; },
+    inject: (names, cb) => {
+      try {
+        cb({
+          logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+          effect: (fn) => { const d = fn(); return typeof d === "function" ? d : () => {}; },
+          get: () => undefined,
+          settings: undefined,
+        });
+      } catch {
+        /* 探针 ctx 不完整，与本次断言无关 */
+      }
+    },
+    on: () => {},
+    get: () => undefined,
+    tools: { register(t) { pollutionTools.set(t.name, t); return () => {}; } },
+  };
+
+  // 模拟被 volatile 空壳污染的 rawConfig：对象值必须被丢弃，标量与数组保留。
+  const pollutedRaw = {
+    site: {},
+    outDir: {},
+    gifWidth: {},
+    plan: {},
+    apiKeyCn: "sk-real",
+    imageModelsCn: ["agnes-image-2.5-flash"],
+  };
+  mod.apply(pollutionCtx, pollutedRaw);
+
+  const pollutionWarn = warns.find((w) => /非标量值/.test(w)) ?? "";
+  check(
+    "行配置里的 volatile 空壳会触发告警（可排查上游污染）",
+    /outDir=\{\}/.test(pollutionWarn) && /site=\{\}/.test(pollutionWarn),
+    pollutionWarn.slice(0, 120),
+  );
+  check(
+    "空壳被丢弃后回落默认：outDir 仍是字符串（否则 path.resolve 抛 paths[1]）",
+    typeof mod.DEFAULT_CONFIG.outDir === "string" && mod.DEFAULT_CONFIG.outDir === "",
+    JSON.stringify(mod.DEFAULT_CONFIG.outDir),
+  );
+
+  // 关键回归：真正跑一次 execute，确认不再抛 paths[1]。
+  const imgTool = pollutionTools.get("agnes_image");
+  let execErr = "";
+  try {
+    await imgTool.execute(
+      { prompt: "x", model: "__bogus__" },
+      { agent: { session: { header: { cwd: process.cwd() } } } },
+    );
+  } catch (err) {
+    execErr = err.message;
+  }
+  check(
+    "被污染的行配置下，agnes_image 不再抛 paths[1]（停在模型校验处）",
+    !/paths\[\d\]/.test(execErr) && /模型/.test(execErr),
+    execErr.slice(0, 120),
+  );
+
+  // cwd 被污染时同样不能炸：sessionCwd 会回落到 process.cwd()
+  let cwdErr = "";
+  try {
+    await imgTool.execute(
+      { prompt: "x", model: "__bogus__" },
+      { agent: { session: { header: { cwd: { polluted: true } } } } },
+    );
+  } catch (err) {
+    cwdErr = err.message;
+  }
+  check(
+    "会话 cwd 不是字符串时回落到 process.cwd()，不抛路径类型错误",
+    !/paths\[\d\]/.test(cwdErr),
+    cwdErr.slice(0, 120),
+  );
+
+  // 底层生成函数自己也要挡住路径污染——它可能被别处直接调用，
+  // 不能假设调用方一定传了字符串。
+  const { generateImage, generateVideo } = await import(
+    new URL("./lib/client.js", import.meta.url).href
+  );
+  let imgGuardErr = "";
+  try {
+    await generateImage({ prompt: "x", outDir: { polluted: true }, key: "sk-x" });
+  } catch (err) {
+    imgGuardErr = err.message;
+  }
+  check(
+    "generateImage 拒绝对象型 outDir，给出可诊断的错误而非 paths[N]",
+    /outDir 不是字符串/.test(imgGuardErr),
+    imgGuardErr.slice(0, 120),
+  );
+
+  let vidGuardErr = "";
+  try {
+    await generateVideo({ prompt: "x", outDir: { polluted: true }, key: "sk-x" });
+  } catch (err) {
+    vidGuardErr = err.message;
+  }
+  check(
+    "generateVideo 拒绝对象型 outDir，给出可诊断的错误而非 paths[N]",
+    /outDir 不是字符串/.test(vidGuardErr),
+    vidGuardErr.slice(0, 120),
+  );
+
+  // GIF 转换同理（它也直接吃路径）。
+  const { toGif } = await import(new URL("./lib/gif.js", import.meta.url).href);
+  let gifGuardErr = "";
+  try {
+    toGif({ polluted: true }, { alsoPolluted: true });
+  } catch (err) {
+    gifGuardErr = err.message;
+  }
+  check(
+    "toGif 拒绝对象型路径，给出可诊断的错误而非 paths[N]",
+    /不是字符串/.test(gifGuardErr),
+    gifGuardErr.slice(0, 120),
+  );
+}
+
+// ---- 4l. 0.1.7 下配置卡保存的 Key 必须被工具读到 ----
+//
+// 对应一次真实故障：`rawConfig` 是 **apply() 那一刻**的行配置快照，配置卡写入
+// profile patch 后 DSH **不会重新调用 apply()**——所以只认 rawConfig 的话，
+// 界面显示「已保存」、patch 文件也真的变了，工具却仍报「未找到 Agnes API Key」。
+//
+// 修法是让 settingsSource 在 0.1.7 下实时问 `describe()`。两个必须正确的细节：
+//   1. 取 **`user`** 层而不是 `value` 层。`value` 是全字段生效值（含默认），
+//      拿它去覆盖 `{...config, ...source()}` 会把 rawConfig 里的显式配置一并盖掉
+//      ——实测表现为 `site: "intl"` 被打回 `"cn"`，于是去中国站找 Key。
+//   2. 不能传 `{ redactSecrets: true }`，否则密钥被 `role('secret')` 抹掉
+//      （实测 user 层只剩 site）。
+{
+  // 可变的 user 层，模拟 Host 侧的"用户覆盖"。
+  const live = { user: {} };
+  const svc = {
+    configure: () => () => {},
+    describe: () => [
+      { ns: "agnes-gen", value: { site: "cn", gifWidth: 480 }, user: live.user, base: {}, revision: 1 },
+    ],
+  };
+
+  const svcTools = new Map();
+  const mkCtx = (tools) => ({
+    logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+    effect: (fn) => { const d = fn(); return typeof d === "function" ? d : () => {}; },
+    inject: (names, cb) => {
+      if (names[0] === "settings") {
+        cb({
+          logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+          effect: (fn) => { const d = fn(); return typeof d === "function" ? d : () => {}; },
+          get: () => svc,
+          settings: svc,
+        });
+      }
+    },
+    on: () => {},
+    get: () => undefined,
+    tools: { register(t) { tools.set(t.name, t); return () => {}; } },
+  });
+
+  const exec = { agent: { session: { header: { cwd: process.cwd() } } } };
+
+  // apply 时的 rawConfig 里没有 Key（模拟"还没在配置卡里填"）。
+  mod.apply(mkCtx(svcTools), { site: "intl" });
+  const svcImg = svcTools.get("agnes_image");
+
+  let beforeSave = "";
+  try {
+    await svcImg.execute({ prompt: "x" }, exec);
+  } catch (err) {
+    beforeSave = err.message;
+  }
+  check(
+    "0.1.7 未配置 Key 时报「未找到 API Key」（不会拿默认值瞎试）",
+    /未找到 Agnes API Key/.test(beforeSave),
+    beforeSave.slice(0, 90),
+  );
+
+  // 模拟配置卡保存：只有 describe() 的 user 层能看到，rawConfig 不变。
+  live.user = { site: "intl", apiKeyIntl: "sk-intl-SAVED-BY-CARD" };
+
+  let afterSave = "";
+  try {
+    await svcImg.execute({ prompt: "x" }, exec);
+  } catch (err) {
+    afterSave = err.message;
+  }
+  check(
+    "0.1.7 配置卡保存 Key 后，工具立刻读得到（不再报「未找到 API Key」）",
+    !/未找到 Agnes API Key/.test(afterSave),
+    afterSave.slice(0, 90),
+  );
+  check(
+    "0.1.7 实时读取取的是 user 层，rawConfig 的 site 没被 value 层默认值盖掉",
+    /apihub|国际站|Invalid token/i.test(afterSave),
+    afterSave.slice(0, 90),
+  );
+
+  // 反向保护：rawConfig 里显式写的键，不能被 describe 的 value（含默认值）盖掉。
+  const live2 = { user: {} };
+  const svc2 = {
+    configure: () => () => {},
+    describe: () => [
+      { ns: "agnes-gen", value: { site: "cn", gifWidth: 480 }, user: live2.user, base: {}, revision: 1 },
+    ],
+  };
+  const tools2 = new Map();
+  const ctx2 = {
+    logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+    effect: (fn) => { const d = fn(); return typeof d === "function" ? d : () => {}; },
+    inject: (names, cb) => {
+      if (names[0] === "settings") {
+        cb({
+          logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+          effect: (fn) => { const d = fn(); return typeof d === "function" ? d : () => {}; },
+          get: () => svc2,
+          settings: svc2,
+        });
+      }
+    },
+    on: () => {},
+    get: () => undefined,
+    tools: { register(t) { tools2.set(t.name, t); return () => {}; } },
+  };
+  mod.apply(ctx2, { site: "intl", apiKeyIntl: "sk-intl-FROM-PATCH" });
+  let msg2 = "";
+  try {
+    await tools2.get("agnes_image").execute({ prompt: "x" }, exec);
+  } catch (err) {
+    msg2 = err.message;
+  }
+  check(
+    "describe 的 value 层（含默认值）不会盖掉 rawConfig 的显式配置",
+    !/未找到 Agnes API Key/.test(msg2),
+    msg2.slice(0, 90),
+  );
+}
+
+// ---- 4m. 清除 Key 后「已配置」标记必须消失 ----
+//
+// 对应一次真实故障：用户点「清除已配置的 Key」后，输入框仍显示「已配置」。
+//
+// 根因是 `settingsUserKeys` 曾把 `apply()` 时刻的 `Object.keys(rawConfig)`
+// 与实时 user 层取并集——那个快照在用户清除后不会更新，于是键名永远留在
+// `overriddenKeys` 里，界面据此画的「已配置 / 重置」标记也就永不消失。
+//
+// `describe().user` 读的就是 profile patch 的当前内容，与 rawConfig 同源且实时，
+// 单个来源即可覆盖「patch 里写的」与「配置卡刚改的」两种情况。
+{
+  const live = { user: { apiKeyIntl: "sk-intl-SAVED" } };
+  const routes = new Map();
+  const svc = {
+    configure: () => () => {},
+    describe: () => [{ ns: "agnes-gen", value: { site: "cn" }, user: live.user, revision: 1 }],
+  };
+  const mkSub = () => ({
+    logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+    effect: (fn) => { const d = fn(); return typeof d === "function" ? d : () => {}; },
+    get: () => svc,
+    settings: svc,
+  });
+  const webCtx = {
+    logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+    effect: (fn) => { const d = fn(); return typeof d === "function" ? d : () => {}; },
+    webServer: { register(o) { routes.set(o.path, o); return () => {}; } },
+  };
+  const ctx3 = {
+    logger: () => ({ info() {}, warn() {}, error() {}, debug() {} }),
+    effect: (fn) => { const d = fn(); return typeof d === "function" ? d : () => {}; },
+    inject: (names, cb) => {
+      if (names[0] === "settings") cb(mkSub());
+      if (names[0] === "webServer") cb(webCtx);
+      if (names[0] === "skills") cb({ logger: () => ({ info() {}, warn() {} }), effect: (f) => { f(); }, skills: { register: () => () => {} } });
+    },
+    on: () => {},
+    get: () => undefined,
+    tools: { register: () => () => {} },
+  };
+
+  // apply 时 rawConfig 里**有** apiKeyIntl —— 这正是旧实现会卡住快照的情形。
+  mod.apply(ctx3, { site: "cn", apiKeyIntl: "sk-intl-AT-APPLY" });
+
+  const callStatus = async () => {
+    const route = routes.get("/plugins/dsh-agnes-gen/status");
+    const req = { method: "GET", socket: { remoteAddress: "127.0.0.1" }, url: "/plugins/dsh-agnes-gen/status" };
+    const res = { status: 0, body: "", writeHead(s) { this.status = s; }, end(b) { if (b) this.body += b; } };
+    await route.handler(req, res);
+    return JSON.parse(res.body);
+  };
+
+  const before = await callStatus();
+  check(
+    "已配置的 Key 会出现在 overriddenKeys 里（「已配置」标记的来源）",
+    (before.overriddenKeys ?? []).includes("apiKeyIntl"),
+    JSON.stringify(before.overriddenKeys),
+  );
+
+  // 用户点「清除已配置的 Key」：describe 的 user 层不再含它。
+  live.user = {};
+  const after = await callStatus();
+  check(
+    "清除 Key 后 overriddenKeys 不再包含它（标记会消失）",
+    !(after.overriddenKeys ?? []).includes("apiKeyIntl"),
+    JSON.stringify(after.overriddenKeys),
   );
 }
 

@@ -25,7 +25,79 @@ Host 侧使用两个第一方依赖，在 `peerDependencies` 里声明（版本�
 
 `dsh-tools` 的 peer 范围是 `^0.1.6-alpha.2 || ^0.1.7-alpha.1`——两个版本线都兼容。注意用单个 `>=…<…` 范围会因为 node-semver 的 prerelease 语义漏掉 `0.1.7-alpha.1`，必须给每个 patch 各写一个 `^` 分支。
 
-DSH 的设置接口在 `0.1.6` 与 `0.1.7` 是两套不兼容的实现：`0.1.6` 的 `SettingsProvider` 提供 `get(ns)` / `installSection(...)` / `describe()`；`0.1.7` 的 `SettingsForms` 不再有这三者，只有 `configure/describe/update/replace/mutate`，配置改由插件条目的 `cordis.patch.yml` 承载。`index.js` 用 `typeof settings.get === "function"` 在运行期二选一，浏览器半侧用 `ctx.settingsScope` 是否存在判断（guard 对「已声明但未提供的服务」返回 `undefined` 而不抛错，因此 `inject` 里保留 `"settingsScope"` 是安全的）。自检（`selfcheck.mjs`）覆盖了两条路径。
+DSH 的设置接口在 `0.1.6` 与 `0.1.7` 是两套不兼容的实现：`0.1.6` 的 `SettingsProvider` 提供 `get(ns)` / `installSection(...)` / `describe()`；`0.1.7` 的 `SettingsForms` 不再有这三者，只有 `configure/describe/update/replace/mutate`，配置改由插件条目的 `cordis.patch.yml` 承载。`index.js` 用 `typeof settings.get === "function"` 在运行期二选一，浏览器半侧用 `ctx.get("configForms")` 与 `ctx.get("settingsScope")` 探测可用服务。
+
+**两个容易踩死的坑（都已在真实 0.1.7 上验证）：**
+
+1. **服务不能写进 `inject`。** `inject` 里的服务是**激活依赖**：服务缺席时条目会永远停在 `pending (waiting for service: …)`，整个 profile 报 `Failed to load plugins`。runner 的读 guard（`ctx.get(name)` 对未声明服务返回 `undefined` 而不抛错）只保证**读**不炸，不改变激活语义。所以浏览器半侧的 `inject` 只有 `["slots"]`，`settingsScope` / `configForms` 一律用 `ctx.get(name)` 可选探测。
+
+2. **`Config` 必须逐字段标 `.volatile()`，否则 0.1.7 的配置页根本不显示这个插件。** `dsh-settings` 的 `describe()` 对每个活动条目调用 `volatileForm(schema)`，**返回 `undefined` 的条目整条被丢弃**：
+
+   ```
+   volatileForm(schema):
+     schema.meta.volatile  -> 整个 schema 变表单
+     type === 'object'     -> 递归收集标了 volatile 的子字段
+     否则                   -> undefined（条目被 describe 剔除）
+   ```
+
+   判定条件与插件来源无关（第一方 `dsh-web-search-deepseek` 同样逐字段标记）。连带影响：volatile 字段**求值时返回引用对象**（`Config({})` → `{ site: {}, … }`），所以 `defaultConfig()` 改读 `meta.default`；且**不能**标在根节点上（会让整个 schema 变惰性引用，默认值都读不出）。
+
+3. **机密字段的「已落地」确认通道在 0.1.7 下会失效，必须换判据。** 两个事实叠在一起才会触发：
+
+   - `redactSecrets()` 把 `role('secret')` 字段从下发的 user 层里**整个删掉**（实测：override 里有 `apiKeyIntl`，浏览器收到的 `user` 只有 `site`/`plan`/`gifWidth`），所以 `userKeys()` 对机密字段永远回答「没有」；
+   - 0.1.7 的 `mutate()` **返回 boolean**（`false` = Host 拒绝，见 `dsh-client-ui-settings/lib/client.js` 的 `if (!response.ok) { …; return false; }`），而 0.1.6 返回 `void`。
+
+   旧代码只看回读、且对机密字段判定「`userKeys` 里没有 = 未生效」，于是**每次保存 API Key 都误报「保存未生效」**（写入其实成功了）。修法是两层：
+   - 以 `mutate()` 的返回值为首要判据（`false` 直接报错；`true`/`undefined` 才继续核对）；
+   - 核对时用 `verifyVisible()` 跳过机密字段——Host 已明确接受时，不该再用「看不见的字段」去否定它。
+
+   同时 Host 侧补上 `settingsUserKeys`：0.1.7 下 `rawConfig` **就是** profile patch 的覆盖层，`Object.keys(rawConfig)` 天然就是「用户覆盖了哪些字段」。客户端 `userKeys()` 只从中挑选 `SECRET_KEYS`，因此非机密字段的状态不受影响。
+
+4. **volatile 字段求值返回引用对象，绝不能让它流进路径或持久化。** 这是全字段 `.volatile()` 的连带代价，也是本项目踩过的最隐蔽的一个坑：
+
+   ```
+   Config({}).outDir  ->  {}      // 不是 ""
+   Config({}).site    ->  {}      // 不是 "cn"
+   ```
+
+   volatile 字段在 Schemastery 里是「可变的活引用」，取值必须 `.get()` 解包（第一方 `dsh-web-search-deepseek` 读配置时正是逐字段 `config.apiKey.get()`）。本插件**不**做解包，而是把 schema 当默认值声明表读（`defaultConfig()` 读 `meta.default`），所以自身拿到的值是对的。
+
+   但只要上游任何一环把**求值结果**当作行配置传进来，`cfg.outDir` 就成了对象，随后 `path.resolve(cwd, {})` 抛出：
+
+   ```
+   The "paths[1]" argument must be of type string. Received an instance of Object
+   ```
+
+   ——一个与「生成图片」毫无关系、每次调用都复现、且完全无法从报错反推原因的错误。防线分三层：
+
+   - `apply()` 丢弃行配置里的非标量非数组值（回落默认值，并 warn 出被丢掉的键）；
+   - `pathFromConfig()` / `sessionCwd()` 把所有「配置 → 路径」的取值收敛成字符串；
+   - `generateImage` / `generateVideo` / `toGif` 各自再挡一道，给出「outDir 不是字符串」这种可诊断的错误，而不是让 `path.*` 抛出类型错误。
+
+   三层彼此独立，任何一层单独存在都能挡住这个故障——这正是反向验证时需要**同时**去掉三层，才能让测试复现出原始报错的原因。
+
+5. **0.1.7 下配置必须实时读，且要读 `describe()` 的 `user` 层而不是 `value` 层。** `rawConfig` 是 **`apply()` 那一刻**的行配置快照，配置卡写入 profile patch 后 DSH **不会重新调用 `apply()`**——只认 `rawConfig` 的话，界面显示「已保存」、patch 文件也真的变了，工具却仍报「未找到 Agnes API Key」。
+
+   修法是让 `settingsSource` 在 0.1.7 下问 `describe()`。`describe()` 给每个活动条目返回三层**未脱敏**的值：
+
+   | 层 | 含义 | 能否用作 `settingsSource()` |
+   |---|---|---|
+   | `value` | 全字段生效值（默认 + 组合层 + 用户层） | **不能**——含默认值，会盖掉 `rawConfig` |
+   | `base` | 组合层 | 不能 |
+   | `user` | 用户真正写下的覆盖层（只有那几个键） | **是** |
+
+   误用 `value` 层的实测后果：`rawConfig = { site: "intl", apiKeyIntl: "sk-…" }` 被 describe 的默认值 `site: "cn"` 盖掉 → 去中国站找 Key → 再次「未找到 Agnes API Key」。
+
+   另外**不能**传 `{ redactSecrets: true }`：那是给远程/浏览器调用方用的，会按 `role('secret')` 把密钥整个抹掉（实测 user 层只剩 `site`）。Host 进程内部读取要的就是原值。
+
+   代价是 `describe()` 遍历全部活动条目，实测约 3.4ms/次（约 30 个条目）——对一次几秒到几分钟的生成调用可忽略。**刻意不加缓存**：配置卡保存与工具调用可能只隔几十毫秒，任何 TTL 都会让用户看到「保存了却没生效」（这一点在自检里被一条断言钉住了）。
+
+6. **「用户覆盖了哪些键」只能有实时这一个来源，且刷新不能被互斥挡掉。** 用户点「清除已配置的 Key」后输入框仍显示「已配置」，是两个问题叠出来的：
+
+   - `settingsUserKeys` 曾把 `apply()` 时刻的 `Object.keys(rawConfig)` 与实时 user 层**取并集**。那个快照在用户清除后不会更新，键名就永远留在 `overriddenKeys` 里，界面据此画的「已配置 / 重置」标记也就永不消失。而 `describe().user` 读的就是 profile patch 的当前内容，与 `rawConfig` 同源**且实时**，单个来源即可覆盖「patch 里写的」与「配置卡刚改的」两种情况——不需要快照兜底。
+   - `refreshStatus()` 在 `statusLoading` 为真时**直接 return**。清除 Key 时若恰好有一次诊断请求在飞，这次刷新就被丢掉，`this.status` 停留在清除之前的内容。因此加了 `refreshStatus(force)`：`clearKey()` 与 `save()` 传 `force`，等前一次结束后再拉一次。
+
+自检（`selfcheck.mjs`）覆盖了两条路径，并把「全字段 volatile」「默认值走 `meta.default`」「0.1.7 保存 Key 不误报」「路径参数不被 volatile 空壳污染」「配置卡保存后工具立刻读到 Key」「清除 Key 后标记消失」六条前提钉成了断言。后四条都经过反向验证：把修复回退（或误用 `value` 层）后，测试会复现出与用户报告**逐字一致**的现象。
 
 ```
 .

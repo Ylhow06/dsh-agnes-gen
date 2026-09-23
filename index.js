@@ -100,6 +100,49 @@ const INTERNAL_DEFAULTS = {
 export const DEFAULT_CONFIG = { ...defaultConfig(), ...INTERNAL_DEFAULTS };
 
 /**
+ * 把配置里的路径值收敛成字符串。
+ *
+ * **为什么需要**：`Config` 的字段全部标了 `.volatile()`（0.1.7 配置表单只投影
+ * volatile 字段），而 volatile 字段在**求值时返回的是引用对象而不是值**：
+ *
+ *     Config({}).outDir  ->  {}          // 不是 ""
+ *     Config({}).site    ->  {}          // 不是 "cn"
+ *
+ * 正常路径下我们读的是 `meta.default`（见 config-schema.js 的 defaultConfig()），
+ * 拿到的确是字符串。但只要有任何一环把**求值结果**当成配置值传进来（例如上游
+ * 用 `Config(raw)` 的结果做中间层），`cfg.outDir` 就会是对象，随后
+ * `path.resolve(cwd, {})` 会抛出与配置毫无关系的
+ * `The "paths[1]" argument must be of type string`。
+ *
+ * 因此所有「配置 → 文件系统路径」的取值都必须过这道闸：非字符串、或空白字符串
+ * 一律视为「未设置」。这样即使上游污染了配置，也只是回落到默认目录，
+ * 而不是让工具彻底不可用。
+ *
+ * @param {unknown} value 配置里的原始值
+ * @returns {string} 可安全交给 path.* 的字符串（未设置时为空串）
+ */
+function pathFromConfig(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * 取本次调用的会话工作目录。
+ *
+ * 第一方工具（dsh-tool-fs / dsh-tool-present）都用 `exec.agent.session.header.cwd`
+ * 作为「当前对话所属的 workspace」，缺省回落 `process.cwd()`（dsh 进程起始目录，
+ * 未必是对话目录）。
+ *
+ * 取值同样要过 {@link pathFromConfig} 那道闸：这个值会直接进 `path.resolve`，
+ * 一旦不是字符串就会抛出与工具本身毫无关系的类型错误。
+ *
+ * @param {object} exec 工具执行上下文
+ * @returns {string} 可安全交给 path.* 的工作目录
+ */
+function sessionCwd(exec) {
+  return pathFromConfig(exec?.agent?.session?.header?.cwd) || process.cwd();
+}
+
+/**
  * 解析本次调用的输出目录：配置 outDir > 环境变量 > <cwd>/out/<kind>。
  *
  * 工具不再暴露 out_dir 参数（调用方不能乱填路径），输出位置只由操作者配置
@@ -107,9 +150,10 @@ export const DEFAULT_CONFIG = { ...defaultConfig(), ...INTERNAL_DEFAULTS };
  * 工作目录下的默认位置。目录自动创建。
  */
 function resolveOutDir({ configOutDir, envVar, cwd, kind }) {
-  const explicit = configOutDir || process.env[envVar];
-  if (explicit) return ensureDir(path.resolve(cwd, explicit));
-  return ensureDir(path.join(cwd, "out", kind));
+  const explicit = pathFromConfig(configOutDir) || pathFromConfig(process.env[envVar]);
+  const root = pathFromConfig(cwd) || process.cwd();
+  if (explicit) return ensureDir(path.resolve(root, explicit));
+  return ensureDir(path.join(root, "out", kind));
 }
 
 /** 读入并解析技能正文（拆掉 frontmatter，只留 markdown 正文）。 */
@@ -154,9 +198,43 @@ function readBody(req) {
 }
 
 export function apply(ctx, rawConfig) {
-  const config = { ...DEFAULT_CONFIG, ...(rawConfig ?? {}) };
+  /**
+   * 行配置清洗：丢掉**非标量且非数组**的值。
+   *
+   * 这不是防御性编程的洁癖，而是针对一个具体故障：`Config` 的字段全标了
+   * `.volatile()`（0.1.7 表单只投影 volatile 字段），volatile 字段在**求值时
+   * 返回引用对象而不是值**——
+   *
+   *     Config({}).outDir  ->  {}      // 不是 ""
+   *     Config({}).site    ->  {}      // 不是 "cn"
+   *
+   * 于是只要上游任何一环把**求值结果**当作配置传进来（不同 DSH 版本的持久化
+   * 与透传方式不同），我们就会收到 `outDir: {}` 这样的值，最终在
+   * `path.resolve(cwd, {})` 里炸成
+   * `The "paths[1]" argument must be of type string. Received an instance of Object`
+   * ——一个与「生成图片」毫无关系、且每次调用都复现的错误。
+   *
+   * 丢掉这类值即可回落到 `DEFAULT_CONFIG` 里的正确默认值；标量与数组原样保留。
+   * 被丢掉的值会记一条 warn，便于排查上游污染。
+   */
+  const incoming = Object.entries(rawConfig ?? {}).filter(([, value]) => {
+    if (value === null || typeof value !== "object") return true;
+    return Array.isArray(value);
+  });
+  const rejected = Object.entries(rawConfig ?? {})
+    .filter(([key, value]) => !incoming.some(([k]) => k === key))
+    .map(([key, value]) => `${key}=${JSON.stringify(value)}`);
+
+  const config = { ...DEFAULT_CONFIG, ...Object.fromEntries(incoming) };
   const baseUrl = new URL("./", import.meta.url);
   const logger = ctx.logger("agnes-gen");
+
+  if (rejected.length) {
+    logger.warn(
+      `行配置里有非标量值（很可能是 volatile 字段的引用空壳），已按「未设置」处理并回落到默认值：` +
+        rejected.join("、"),
+    );
+  }
 
   /**
    * 用户设置层的读取函数。未挂载 settings provider 时保持「空覆盖」，
@@ -258,10 +336,7 @@ export function apply(ctx, rawConfig) {
       },
       async execute(args, exec) {
         const cfg = effectiveConfig();
-        // 工作目录来自会话 header（第一方工具如 dsh-tool-fs / dsh-tool-present 都用它）：
-        // exec.agent.session.header.cwd 才是**当前对话所属的 workspace**。
-        // 缺省回落 process.cwd()（dsh 进程起始目录），后者未必是对话目录。
-        const cwd = exec.agent?.session?.header?.cwd || process.cwd();
+        const cwd = sessionCwd(exec);
         const outDir = resolveOutDir({
           configOutDir: cfg.outDir,
           envVar: "AGNES_OUT_DIR",
@@ -393,9 +468,7 @@ export function apply(ctx, rawConfig) {
       },
       async execute(args, exec) {
         const cfg = effectiveConfig();
-        // 工作目录来自会话 header（同图片工具）——exec.agent.session.header.cwd
-        // 才是当前对话所属的 workspace；缺省回落 dsh 进程起始目录 process.cwd()。
-        const cwd = exec.agent?.session?.header?.cwd || process.cwd();
+        const cwd = sessionCwd(exec);
         const log = makeLog("agnes-video");
         const outDir = resolveOutDir({
           configOutDir: cfg.outDir,
@@ -563,9 +636,104 @@ export function apply(ctx, rawConfig) {
         // ---------------- DSH 0.1.7 路径 ----------------
 
         // 配置由 rawConfig 承载：`effectiveConfig()` = 默认值 + 组合层(rawConfig)。
-        // 保持 settingsSource / settingsUserKeys 为空覆盖，工具照常工作。
-        // 显式请 DSH 从导出 `Config` 自动生成设置表单（默认就是 auto=true，
-        // 这里只是确保打开该能力；返回值是 disposer，挂到本插件 effect 上）。
+        //
+        // ## 为什么必须让 settingsSource 实时读，而不是只吃 rawConfig
+        //
+        // `rawConfig` 是 **apply() 那一刻**的行配置快照。配置卡写入 profile patch
+        // 之后，DSH 会更新条目配置，但**不会重新调用 apply()**——所以只认 rawConfig
+        // 的话，界面上「保存」成功、patch 文件也真的变了，工具却仍然读旧值。
+        // 实测症状：填好 Key 保存后，工具调用仍报「未找到 Agnes API Key」。
+        //
+        // 0.1.7 没有 `get(ns)`，但有 `describe()`：它给每个活动条目返回三层
+        // **未脱敏**的值：
+        //
+        //   value —— 全字段「生效值」（默认 + 组合层 + 用户层）
+        //   base  —— 组合层
+        //   user  —— 用户**真正写下的覆盖层**（只有那几个键）
+        //
+        // 这里必须取 **`user`**，不能取 `value`。`settingsSource()` 的语义是
+        // 「用户层覆盖」，它在 `effectiveConfig()` 里是 `{...config, ...source()}`——
+        // 用一个含全部默认值的 `value` 去覆盖，会把 `rawConfig` 里的显式配置
+        // 一并盖掉。实测过这个坑：
+        //
+        //   rawConfig = { site: "intl", apiKeyIntl: "sk-…" }
+        //   value     = { site: "cn", gifWidth: 480, … }      // 默认值
+        //   => 合并后 site 变回 "cn"，于是去中国站找 Key -> 「未找到 Agnes API Key」
+        //
+        // 用 `user` 层则只覆盖用户真正改过的键，`rawConfig` 的其余值原样保留。
+        //
+        // 另外**不能**传 `{ redactSecrets: true }`：那是给远程/浏览器调用方用的，
+        // 会按 `role('secret')` 把密钥整个抹掉（实测 user 层只剩 site）。
+        // 这里是 Host 进程内部读取，要的就是原值。
+        //
+        // 代价：`describe()` 遍历全部活动条目，实测约 3.4ms/次（约 30 个条目）。
+        // 对一次几秒到几分钟的生成调用完全可以忽略。
+        //
+        // **刻意不做缓存**：缓存会引入「刚保存的配置读不到」这类问题——配置卡
+        // 保存与工具调用之间可能只隔几十毫秒，任何 TTL 都会让用户看到
+        // 「保存了却没生效」。3.4ms 换掉这类 bug 是划算的。
+        settingsSource = () => {
+          let layer = {};
+          try {
+            const views = settings.describe?.();
+            const row = Array.isArray(views)
+              ? views.find((v) => v.ns === AGNES_SETTINGS_NS)
+              : undefined;
+            if (row?.user && typeof row.user === "object" && !Array.isArray(row.user)) {
+              layer = row.user;
+            }
+          } catch {
+            // describe 不可用（更早的 DSH 版本）时退化为「无用户层覆盖」，
+            // 配置回落 rawConfig + 默认值 —— 与注册设置服务之前的行为一致。
+            layer = {};
+          }
+          // 只保留 schema 声明过的字段，并挡掉对象值：volatile 字段在别处可能
+          // 以引用空壳形式出现，进了 effectiveConfig() 会污染下游的路径/数值
+          // 读取（见本文件关于 `The "paths[N]" argument must be of type string` 的说明）。
+          const clean = {};
+          for (const key of Object.keys(Config.dict ?? {})) {
+            const v = layer[key];
+            if (v === undefined) continue;
+            if (v !== null && typeof v === "object" && !Array.isArray(v)) continue;
+            clean[key] = v;
+          }
+          return clean;
+        };
+
+        // 「用户已覆盖了哪些字段」——**只以实时的 `describe().user` 层为准**。
+        //
+        // 为什么需要它：机密的 `role('secret')` 字段会被 `redactSecrets()` 从
+        // 下发给浏览器的 user 层里**整个删掉**（实测：override 里有 apiKeyIntl，
+        // 但浏览器收到的 user 只有 site/plan/gifWidth）。若只靠 `snapshot.user`
+        // 判断覆盖状态，机密字段的「已覆盖 / 重置」永远不亮，**而且每次保存
+        // API Key 都会误报「保存未生效」**——因为确认通道恒为「没有这个键」。
+        // 因此由 Host 侧补一份键名清单。**只回传键名**：值一律不出这一层。
+        //
+        // 注意**不要**再并上 `Object.keys(rawConfig)`：那是 apply() 那一刻的
+        // 快照，用户之后在配置卡里**清除** Key 时它不会跟着消失，界面就会一直
+        // 显示「已配置」——实测复现过。而 `describe().user` 读的就是 profile
+        // patch 的当前内容，与 rawConfig 同源且**实时**，单个来源即可覆盖
+        // 「patch 里写的」与「配置卡刚改的」两种情况。
+        settingsUserKeys = () => Object.keys(settingsSource());
+
+        // 关于配置卡：0.1.7 的 `SettingsForms.describe()` 遍历活动条目，
+        // 对每个条目调用 `volatileForm(schema)`；**返回 undefined 的条目整条被
+        // 剔除**，客户端因此拿不到任何数据。而 volatileForm 只有当 schema 里
+        // 存在 `.volatile()` 字段时才不返回 undefined：
+        //
+        //     volatileForm(schema):
+        //       schema.meta.volatile  -> 整个 schema 变表单
+        //       type === 'object'     -> 递归收集标了 volatile 的子字段
+        //       否则                   -> undefined（条目被 describe 丢弃）
+        //
+        // 所以 `lib/config-schema.js` 的 Config **逐字段**标了 `.volatile()`
+        // ——这是配置卡能在 0.1.7 显示的前提，不是可选项。判定条件与插件来源
+        // 无关（第一方 `dsh-web-search-deepseek` 同样如此标记）。
+        //
+        // `configure({ auto: true })` 在这里**不是**「让条目可见」的开关
+        // （可见性由 volatile 决定）；它只声明本插件的页面策略为「按 schema
+        // 自动生成」。默认值本就是 true，显式声明一次是为了让策略归属明确
+        // （策略绑定到本插件的 fiber）。
         if (typeof settings.configure === "function") {
           ctx.effect(
             () => {
@@ -578,8 +746,8 @@ export function apply(ctx, rawConfig) {
           );
         }
         logger.info(
-          `运行于 DSH 0.1.7+ 设置接口：使用插件条目配置（rawConfig），设置表单由 DSH 自 ` +
-            `Config 自动生成。`,
+          `运行于 DSH 0.1.7+ 设置接口：配置取自插件条目配置（rawConfig），` +
+            `配置表单由 DSH 从 Config 的 volatile 字段投影生成。`,
         );
       }
     } catch (err) {
