@@ -1,7 +1,7 @@
 # dsh-agnes-gen
 
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![version: 0.1.1](https://img.shields.io/badge/version-0.1.1-blue)
+![version: 0.1.2](https://img.shields.io/badge/version-0.1.2-blue)
 
 Agnes AI 图像 / 视频生成插件，为 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/deepseek-harness) 添加两个模型可见工具 `agnes_image` 与 `agnes_video`。内置跨进程 RPM 限流、429 退避，以及用本机 ffmpeg 把视频转成 GIF。
 
@@ -9,15 +9,23 @@ Agnes AI 图像 / 视频生成插件，为 [DSH（DeepSeek Harness）](https://g
 
 ## DSH 版本适配
 
-本插件**同时支持 DSH `0.1.6-alpha` 与 `0.1.7-alpha` 两条版本线**（含 `0.1.7-alpha.2`），安装同一个包即可，不用按版本挑。
+| DSH 版本 | 状态 | 需要做什么 |
+|---|---|---|
+| `0.1.6-alpha.2` 起的 `0.1.x`（含其后全部 `alpha` / `rc` / 正式版） | ✅ 支持 | 无 |
+| `0.2.0-rc.1` 起的 `0.2.x`（含其后全部 `rc` / 正式版） | ✅ 支持（需插件 `0.1.2`+） | 把插件升到 `0.1.2` 或更高 |
+| 早于 `0.1.6-alpha.2` 的版本 | ❌ 不支持 | 请提 issue |
 
-- **两个生成工具在两条版本线上都完全可用。**
-- 只有**配置界面**的样子不同：`0.1.6` 用本插件自带的配置卡（多一个「校验 Key & 拉取模型」按钮），`0.1.7` 用 DSH 生成的原生表单。配置项名称与含义完全一致。
-- 配置**改完立即生效**，两条版本线都不用重启。
+同一条 `0.x` 线内的所有 `alpha` / `rc` / 正式版都自动覆盖——**DSH 在同一条线上更新（如 `0.1.7-rc.1` → `0.1.8-alpha.1`）不用动插件**。
 
-> 安装时如果提示 peer 依赖不匹配，说明你的 DSH 版本不在上述范围内，请提 issue。
+- 两个生成工具在所有受支持版本上都完全可用。
+- 只有**配置界面**的样子不同：`0.1.6` 用本插件自带的配置卡（多一个「校验 Key & 拉取模型」按钮），`0.1.7` 起用 DSH 生成的原生表单。配置项名称与含义完全一致。
+- 配置**改完立即生效**，所有受支持版本都不用重启。
+
+> 安装时提示 peer 不匹配、或插件在界面上不出现，说明你的 DSH 不在上表范围内，请提 issue。
 
 > **依赖**：宿主 DSH 自带 `@deepseek-ai/dsh-tools` 与 `@deepseek-ai/schemastery`（本插件在 `peerDependencies` 里声明），无需手动安装。
+>
+> 维护者视角的判定规则与发版流程见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
 ## 功能
 
@@ -26,7 +34,7 @@ Agnes AI 图像 / 视频生成插件，为 [DSH（DeepSeek Harness）](https://g
 - ⏱ **429 退避**：自动等待服务端 `Retry-After`（上限 120 秒），不无意义重试。
 - 🎞 **本地 GIF 转换**：视频转 GIF 走本机 ffmpeg，纯本地、不额外计费；ffmpeg 缺失时自动降级为仅返回 mp4。
 - 🗝 **按站点管理密钥**：中国站 / 国际站两套 Key 分开保存、互不通用。
-- 🎛 **图形配置界面**：在 DSH Web GUI 的「插件」页直接配置站点、API Key、RPM 预设、模型白名单、ffmpeg 路径（0.1.6 为自带配置卡，0.1.7 为原生表单）。
+- 🎛 **图形配置界面**：在 DSH Web GUI 的「插件」页直接配置站点、API Key、RPM 预设、模型白名单、ffmpeg 路径（0.1.6 为自带配置卡，0.1.7+ 为原生表单）。
 - 📚 **内置技能**：随插件附带 `agnes-image` / `agnes-video` 两个技能，引导 AI 正确调用工具。
 
 ## 安装
@@ -67,7 +75,7 @@ Agnes AI 图像 / 视频生成插件，为 [DSH（DeepSeek Harness）](https://g
 
 ```bash
 npm pack .
-dsh plugin --profile <profile> add ./dsh-agnes-gen-0.1.1.tgz
+dsh plugin --profile <profile> add ./dsh-agnes-gen-0.1.2.tgz
 ```
 
 ### 卸载（命令行）
@@ -96,7 +104,7 @@ dsh plugin --profile <profile> remove dsh-agnes-gen
 
 > ⚠️ **两站的 Key 不通用。** 中国站与国际站是两套独立服务、独立令牌体系，拿国际站的 Key 打国内站只会得到 401。界面按站点只显示对应那一个输入框，两站 Key 各存一份、各用一份。
 >
-> ⚠️ **`site` 与 Key 必须匹配。** 选了中国站就要填 `apiKeyCn`，选了国际站就要填 `apiKeyIntl`——填错一边会直接报「未找到 Agnes API Key（xx站）」。0.1.7 的原生表单没有「校验 Key」按钮，可用下面的诊断路由确认 Key 是否已就位。
+> ⚠️ **`site` 与 Key 必须匹配。** 选了中国站就要填 `apiKeyCn`，选了国际站就要填 `apiKeyIntl`——填错一边会直接报「未找到 Agnes API Key（xx站）」。0.1.7+ 的原生表单没有「校验 Key」按钮，可用下面的诊断路由确认 Key 是否已就位。
 
 ### 开始生成
 
@@ -153,14 +161,14 @@ agnes_video(prompt="夜晚森林中三只猫组成微型铜管乐队向前行进
 
 **推荐用图形界面**：DSH Web GUI → 侧栏「插件」→ 点开 `dsh-agnes-gen`。配置写在哪里取决于你的 DSH 版本（见 [DSH 版本适配](#dsh-版本适配)）：
 
-| DSH 版本 | 界面 | 落点 |
+| DSH 版本线 | 界面 | 落点 |
 |---|---|---|
-| `0.1.6-alpha.x` | 本插件自带的配置卡 | DSH 的 `settings.yaml` 中 `agnes-gen:` 分节 |
-| `0.1.7-alpha.x` | DSH 生成的原生表单 | profile 的 `cordis.patch.yml` 中本插件条目的 `config:` |
+| `0.1.6.x` | 本插件自带的配置卡 | DSH 的 `settings.yaml` 中 `agnes-gen:` 分节 |
+| `0.1.7.x` 及更新（含 `0.2.x`） | DSH 生成的原生表单 | profile 的 `cordis.patch.yml` 中本插件条目的 `config:` |
 
-两者都**改完立即生效，无需重启**。也可以直接编辑文件。
+两条线都**改完立即生效，无需重启**。也可以直接编辑文件。
 
-**DSH 0.1.6** — 编辑 DSH 的 `settings.yaml`：
+**DSH `0.1.6.x`** — 编辑 DSH 的 `settings.yaml`：
 
 ```yaml
 agnes-gen:
@@ -171,7 +179,7 @@ agnes-gen:
   outDir: ''
 ```
 
-**DSH 0.1.7** — 编辑当前 profile 的 `cordis.patch.yml`：
+**DSH `0.1.7.x` 及更新（含 `0.2.x`）** — 编辑当前 profile 的 `cordis.patch.yml`：
 
 ```yaml
 - id: agnes-gen
@@ -184,7 +192,7 @@ agnes-gen:
     outDir: ''
 ```
 
-> **0.1.7 上「配置界面不显示本插件」**：这通常说明 `Config` 的 `.volatile()` 标记被改动过，重新安装即可恢复。实现细节见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
+> **0.1.7+ 上「配置界面不显示本插件」**：这通常说明 `Config` 的 `.volatile()` 标记被改动过，重新安装即可恢复。实现细节见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
 ### 完整配置项
 
@@ -209,7 +217,7 @@ agnes-gen:
 | `imageModels<Site>` | `["agnes-image-2.5-flash"]` | 该站的**可选**图像模型集（白名单） |
 | `videoModels<Site>` | `["agnes-video-2.5-flash"]` | 该站的**可选**视频模型集（白名单） |
 
->`<Site>` ∈ `Cn` / `Intl`。以下三项**不在配置界面、也不参与「恢复默认」**，只能手工编辑配置文件（0.1.6 写进 `settings.yaml` 的 `agnes-gen:` 分节，0.1.7 写进 profile `cordis.patch.yml` 的条目 `config:`）：`imageTimeoutMs`（默认 300000，图像请求超时）、`videoTimeoutMs`（默认 1800000，视频任务超时）、`videoPollMs`（默认 2500，视频轮询间隔）。
+>`<Site>` ∈ `Cn` / `Intl`。以下三项**不在配置界面、也不参与「恢复默认」**，只能手工编辑配置文件（0.1.6 写进 `settings.yaml` 的 `agnes-gen:` 分节，0.1.7+ 写进 profile `cordis.patch.yml` 的条目 `config:`）：`imageTimeoutMs`（默认 300000，图像请求超时）、`videoTimeoutMs`（默认 1800000，视频任务超时）、`videoPollMs`（默认 2500，视频轮询间隔）。
 
 ### 自定义模型
 
@@ -270,7 +278,7 @@ GIF 用两遍调色板法（`palettegen` + `paletteuse`），画质优于单遍�
 curl http://127.0.0.1:3080/plugins/dsh-agnes-gen/status
 ```
 
-> 0.1.7 的原生表单没有「校验 Key & 拉取模型」按钮，用 `/check` 可以起到同样作用。
+> 0.1.7+ 的原生表单没有「校验 Key & 拉取模型」按钮，用 `/check` 可以起到同样作用。
 
 ## 安全说明
 
@@ -281,10 +289,12 @@ curl http://127.0.0.1:3080/plugins/dsh-agnes-gen/status
 ## 开发与自检
 
 ```bash
-npm run check        # 等价于 node selfcheck.mjs
+npm run check              # 离线自检（等价于 node selfcheck.mjs）
+npm run check:peer         # 当前 DSH 版本是否落在 peer 范围内
+npm run check:peer -- 0.3.0-rc.1   # 或指定一个版本先问一句
 ```
 
-离线自检检查依赖声明、manifest、工具定义、参数校验、settings schema 的机密标记、默认配置单一来源、两站密钥分离与脱敏、站点路由、浏览器半侧 bundle 加载等。
+离线自检检查依赖声明、manifest、工具定义、参数校验、settings schema 的机密标记、默认配置单一来源、两站密钥分离与脱敏、站点路由、浏览器半侧 bundle 加载等；其中一项会**用本地实际安装的 DSH 版本校验 peer 覆盖**，不覆盖就失败，因此升级 DSH 后跑一次即可知道要不要发版（详见 [DSH 版本适配](#dsh-版本适配)）。
 
 > 完整的开发与测试说明（本地安装的三种回路、`link:` 安装的注意事项、发布前建议）见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
@@ -292,6 +302,7 @@ npm run check        # 等价于 node selfcheck.mjs
 
 | 版本 | 内容 |
 |---|---|
+| `0.1.2` | 适配 DSH `0.2.0-rc.1`：`@deepseek-ai/dsh-tools` peer 追加 `^0.2.0-rc.1` 分支。DSH 自 `0.2.0-rc.1` 起按 `peerDependencies` 做整包兼容性闸门，不追加会被宿主**整体跳过**（`skipping profile bundle`）。**纯 manifest 变更，源码与行为不变**——`0.2.0-rc.1` 的设置接口（`SettingsForms.describe/configure/mutate`）与客户端 `configForms` 服务均未变，运行期探测直接命中 `0.1.7+` 分支。README 的适配说明同时改为**按版本线（看第二位）**表述，不再逐版本枚举 |
 | `0.1.1` | 完善 DSH `0.1.7-alpha` 支持：配置界面可见（`Config` 逐字段 `.volatile()`）、配置实时生效、保存 / 清除 Key 的状态确认与标记刷新；补充图形界面安装 / 卸载说明，精简版本适配章节 |
 | `0.1.0` | 首个版本：`agnes_image` / `agnes_video` 两个工具、跨进程 RPM 限流、429 退避、本地 ffmpeg 转 GIF、Web 配置卡、内置技能 |
 

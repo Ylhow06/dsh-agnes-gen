@@ -100,6 +100,118 @@ check(
 );
 check("已删除手搓的 tool-schema.js", !fs.existsSync(path.join(root, "lib", "tool-schema.js")));
 
+// ---- 2b. 兼容性闸门：peer 范围必须覆盖真实运行时 ----
+//
+// DSH 自 0.2.0-rc.1 起在启动时用 dsh-app-boot 的 `evaluatePluginCompatibility()`
+// 遍历 manifest 里所有 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 的 peer，逐个做
+// `semver.satisfies(runtimeVersion, range, { includePrerelease: true })`；
+// **只要有一个不满足，宿主就整体跳过这个 bundle**，而 pnpm 安装本身照样成功。
+// 症状因此不是「装不上」，而是「工具毫无征兆地消失」——0.1.1 就是这样在
+// DSH 0.2.0-rc.1 上被跳过的。这条把它钉死，避免下次升级 DSH 再踩。
+{
+  // 运行时版本以**实际解析到的第一方包**为准：link/正常安装下它都与宿主同版本，
+  // 且比读某个写死的常量更能反映当前环境。
+  const gatedPeers = Object.keys(pkg.peerDependencies ?? {}).filter(
+    (n) => n === "@deepseek-ai/dsh" || n.startsWith("@deepseek-ai/dsh-"),
+  );
+  check("声明了受闸门管辖的 @deepseek-ai/dsh-* peer", gatedPeers.length > 0, gatedPeers.join(", "));
+
+  /** 取本地实际解析到的第一方包版本；读不到就返回 undefined（例如离线裁剪环境）。 */
+  const installedVersion = (name) => {
+    try {
+      const p = path.join(root, "node_modules", ...name.split("/"), "package.json");
+      return JSON.parse(fs.readFileSync(p, "utf8")).version;
+    } catch {
+      return undefined;
+    }
+  };
+
+  // 一套最小的 semver 比较（含 prerelease 规则），只为实现 caret 范围判定。
+  // 刻意不引入 semver 依赖：自检必须在「只装了 peer 的干净环境」里也能跑。
+  const parseVer = (s) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(s ?? "");
+    return m ? { major: +m[1], minor: +m[2], patch: +m[3], pre: m[4] ? m[4].split(".") : [] } : null;
+  };
+  const cmpPre = (a, b) => {
+    if (a.length === 0 || b.length === 0) return a.length === b.length ? 0 : a.length === 0 ? 1 : -1;
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      const x = a[i];
+      const y = b[i];
+      if (x === undefined) return -1;
+      if (y === undefined) return 1;
+      const xn = /^\d+$/.test(x);
+      const yn = /^\d+$/.test(y);
+      if (xn && yn) {
+        if (+x !== +y) return +x < +y ? -1 : 1;
+      } else if (xn !== yn) {
+        return xn ? -1 : 1;
+      } else if (x !== y) {
+        return x < y ? -1 : 1;
+      }
+    }
+    return 0;
+  };
+  const cmp = (a, b) =>
+    a.major !== b.major
+      ? a.major < b.major
+        ? -1
+        : 1
+      : a.minor !== b.minor
+        ? a.minor < b.minor
+          ? -1
+          : 1
+        : a.patch !== b.patch
+          ? a.patch < b.patch
+            ? -1
+            : 1
+          : cmpPre(a.pre, b.pre);
+  /**
+   * `^X.Y.Z[-pre]` 的**排他**上界，必须带上 prerelease 段 `-0`。
+   *
+   * node-semver 编译出来的实际上界是 `<0.2.0-0`（可实测 `new semver.Range('^0.1.6-alpha.2').range`），
+   * 即**连 `0.2.0` 的任何 prerelease 都不含**。若这里偷懒写成 `<0.2.0`，`0.2.0-rc.1`
+   * 会被误判为「落在 `^0.1.6-alpha.2` 内」——正好把这次要防的 bug 判成通过。
+   */
+  const caretUpper = (v) =>
+    v.major > 0
+      ? { major: v.major + 1, minor: 0, patch: 0, pre: [0] }
+      : v.minor > 0
+        ? { major: 0, minor: v.minor + 1, patch: 0, pre: [0] }
+        : { major: 0, minor: 0, patch: v.patch + 1, pre: [0] };
+  const branchCovers = (branch, ver) => {
+    const body = branch.trim().replace(/^[\^~]/, "");
+    const lo = parseVer(body);
+    if (!lo) return false;
+    return cmp(ver, lo) >= 0 && cmp(ver, caretUpper(lo)) < 0;
+  };
+  const rangeCovers = (range, ver) =>
+    String(range)
+      .split("||")
+      .some((branch) => branchCovers(branch, ver));
+
+  for (const peer of gatedPeers) {
+    const runtime = installedVersion(peer);
+    if (runtime === undefined) {
+      // 装不到第一方包的环境（例如只跑 lint）不该因此判失败。
+      console.log(`SKIP  ${peer} 未在 node_modules 中解析到，跳过运行时覆盖检查`);
+      continue;
+    }
+    const range = pkg.peerDependencies[peer];
+    check(
+      `peer 范围覆盖当前运行时 ${peer}@${runtime}`,
+      rangeCovers(range, parseVer(runtime)),
+      `${range} vs ${runtime}`,
+    );
+
+    // 反向护栏：范围里出现的每个 `^` 分支都必须能解析，别让手滑写出不生效的死分支。
+    const bad = String(range)
+      .split("||")
+      .map((b) => b.trim())
+      .filter((b) => !parseVer(b.replace(/^[\^~]/, "")));
+    check(`peer 范围的每个分支都可解析（${peer}）`, bad.length === 0, bad.join(" | "));
+  }
+}
+
 // 发行元数据：开源给别人装，这几项缺了会用不了或找不到出处。
 check("有 LICENSE 文件", fs.existsSync(path.join(root, "LICENSE")));
 check("license 是 SPDX 标识", /^[A-Za-z0-9.+-]+$/.test(pkg.license ?? ""), String(pkg.license));
@@ -112,7 +224,7 @@ check("engines.node 已声明", typeof pkg.engines?.node === "string");
 check("version 是合法 semver", /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(pkg.version ?? ""), String(pkg.version));
 
 // README 里的版本 badge 与 tarball 文件名都写死了版本号，发版时最容易漏改。
-// 这条把它们钉在一起，避免出现「package.json 是 0.1.1、README 还写着 0.1.0」。
+// 这条把它们钉在一起，避免出现「package.json 是 0.1.2、README 还写着 0.1.1」。
 {
   const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
   check(
@@ -128,6 +240,40 @@ check("version 是合法 semver", /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(pkg.v
   check(
     "README 声明了 DSH 版本适配",
     /## DSH 版本适配/.test(readme) && readme.includes("0.1.6-alpha") && readme.includes("0.1.7-alpha"),
+  );
+  // 信息分工：README 面向**使用者**，只回答「什么版本能用」；实现原因与发版流程
+  // 放在 DEVELOPMENT，避免 README 越写越长（这节曾被要求精简过一次）。
+  // 断言按「区间端点」而非整行文字匹配：表格曾因「整条 0.1.x」与「0.1.5 及更早」
+  // 语义重叠（且漏掉 0.1.6-alpha.1）被返工，端点写法能同时避免重叠与遗漏。
+  check(
+    "README 写明了受支持的版本线及其起点",
+    readme.includes("`0.1.6-alpha.2` 起的 `0.1.x`") && readme.includes("`0.2.0-rc.1` 起的 `0.2.x`"),
+  );
+  // 兼容性闸门是「静默跳过」，最容易出现「代码支持了但文档没提」或反之。
+  // README 只列出 0.2.0-rc.1 是 `0.2.x` 线的起点；闸门原理与适配原因写在 DEVELOPMENT。
+  check(
+    "DEVELOPMENT 记录了 0.2.0-rc.1 闸门的适配说明",
+    fs.readFileSync(path.join(root, "docs", "DEVELOPMENT.md"), "utf8").includes("0.2.0-rc.1"),
+  );
+  // 维护手册里给的命令必须真的存在：文档写了 `npm run check:peer` 却没这个 script，
+  // 或者脚本文件被删掉，都会让「DSH 发新版后怎么办」这条路径失效。
+  check(
+    "package.json 暴露了 check:peer 脚本",
+    typeof pkg.scripts?.["check:peer"] === "string",
+    String(pkg.scripts?.["check:peer"]),
+  );
+  check(
+    "peer 版本检查脚本存在且可被 README 引用",
+    fs.existsSync(path.join(root, "scripts", "check-peer-range.mjs")) && readme.includes("check:peer"),
+  );
+  // 一条 0.x 线内不动插件是这套规则的核心承诺；「看第二位」是它的依据，
+  // 属于维护者知识，因此钉在 DEVELOPMENT 里而不是 README。
+  check(
+    "DEVELOPMENT 说明了「看版本号第二位」的判定依据",
+    (() => {
+      const dev = fs.readFileSync(path.join(root, "docs", "DEVELOPMENT.md"), "utf8");
+      return dev.includes("第二位");
+    })(),
   );
 }
 

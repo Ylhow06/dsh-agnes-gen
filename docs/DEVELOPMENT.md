@@ -23,9 +23,43 @@ Host 侧使用两个第一方依赖，在 `peerDependencies` 里声明（版本�
 | `@deepseek-ai/dsh-tools` | `defineTool`——工具定义、参数编译与校验 |
 | `@deepseek-ai/schemastery` | 配置 schema（`.default()` / `.min()` / `.role('secret')`） |
 
-`dsh-tools` 的 peer 范围是 `^0.1.6-alpha.2 || ^0.1.7-alpha.1`——两个版本线都兼容。注意用单个 `>=…<…` 范围会因为 node-semver 的 prerelease 语义漏掉 `0.1.7-alpha.1`，必须给每个 patch 各写一个 `^` 分支。
+`dsh-tools` 的 peer 范围是 `^0.1.6-alpha.2 || ^0.1.7-alpha.1 || ^0.2.0-rc.1`——三条版本线都兼容。注意用单个 `>=…<…` 范围会因为 node-semver 的 prerelease 语义漏掉 `0.1.7-alpha.1`，必须给每个 patch 各写一个 `^` 分支。
 
-DSH 的设置接口在 `0.1.6` 与 `0.1.7` 是两套不兼容的实现：`0.1.6` 的 `SettingsProvider` 提供 `get(ns)` / `installSection(...)` / `describe()`；`0.1.7` 的 `SettingsForms` 不再有这三者，只有 `configure/describe/update/replace/mutate`，配置改由插件条目的 `cordis.patch.yml` 承载。`index.js` 用 `typeof settings.get === "function"` 在运行期二选一，浏览器半侧用 `ctx.get("configForms")` 与 `ctx.get("settingsScope")` 探测可用服务。
+### peer 范围怎么维护（省事的关键）
+
+**规则：一条 `0.x` 版本线写一个 `^0.x.0-0` 分支，发一次就够了。**
+
+`^0.1.7-alpha.1` 编译出来是 `>=0.1.7-alpha.1 <0.2.0-0`——**上界只由第二位决定**。于是同一条线内的所有 pre-release 与正式版都被自动覆盖，**DSH 发 `0.1.7-alpha.2` / `0.1.7-rc.1` / `0.1.7` / `0.1.8-alpha.1` / `0.1.9` 都不需要动本插件**。只有第二位从 `0.1` 抬到 `0.2`（或 `0.2` 抬到 `0.3`）时才会掉出去，那时才需要跟进。
+
+因此推荐把每条线写成 `-0` 形式，一次覆盖整条线：
+
+```jsonc
+"@deepseek-ai/dsh-tools": "^0.1.6-alpha.2 || ^0.1.7-alpha.1 || ^0.2.0-0"
+//                                                            ^^^^^^^ 覆盖 0.2.x 全线（含 0.2.0-alpha.1）
+```
+
+`^0.2.0-0` 与 `^0.2.0-rc.1` 的差别**只在 `0.2.0` 的 pre-release**：前者连 `0.2.0-alpha.1` 也覆盖，后者从 `rc.1` 起。若某个 `0.2.0-alpha.x` 已经发过且接口不兼容，就不要用 `-0`，改用具体的 `^0.2.0-rc.1`（本插件当前即如此，因为已确认真实发布列表里 `0.2.0` 的第一个 pre-release 是 `rc.1`）。
+
+> 历史版本（`0.1.5` 线）不需要保留分支——没人会用 `0.1.5` 装这个插件的当前版本，写进去只会让范围变长且难以理解。
+
+**为什么 `0.2.0-rc.1` 必须显式写出来**：DSH 自 `0.2.0-rc.1` 起在启动时执行整包兼容性闸门（`dsh-app-boot` 的 `evaluatePluginCompatibility()`）——遍历 manifest 里所有名字为 `@deepseek-ai/dsh` 或以 `@deepseek-ai/dsh-` 开头的 peer，用 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })` 逐个判定；**只要有一个不满足，整个 bundle 被宿主跳过**（`skipping profile bundle`），安装本身却会成功，因此症状是「工具莫名消失」而非安装报错。`0.2.0-rc.1` 不落在 `^0.1.7-alpha.1` 内（semver 的 caret 不含更高 minor 的 prerelease），所以升级 DSH 后必须由插件追加该区间。
+
+**判断要不要发版的最快方法**——把 DSH 的版本号丢给专用脚本，别靠猜：
+
+```bash
+npm run check:peer              # 不给参数：读本地实际安装的 DSH 版本
+npm run check:peer -- 0.2.1-rc.1   # 指定版本：DSH 刚发新版时先问一句
+```
+
+输出会直接告诉你「覆盖 / 未覆盖」，未覆盖时还会给出可粘贴的建议分支。退出码 `0` = 不用发版，`1` = 需要追加分支。
+
+> 别用 `node -e "require('semver')…"` 那种一行写法：插件的 `node_modules` 里**解析不到 `semver`**（它只在宿主的依赖树里），实测会直接 `Cannot find module 'semver'`。`scripts/check-peer-range.mjs` 自带了极简 semver 实现，与 `selfcheck.mjs` 同源，因此不依赖任何外部包。
+
+自检里也有等价护栏：`selfcheck.mjs` 会用**本地实际解析到的第一方包版本**判定 peer 覆盖，不覆盖就 FAIL（`peer 范围覆盖当前运行时 …`）。所以升级 DSH 后先跑 `npm run check`，它会直接告诉你需不需要改 manifest。
+
+> 这条闸门只看 peer **范围**，不看代码实际用到的接口——所以「追加区间」前必须先确认运行时接口没变，否则等于把一次明确的拒绝换成一次静默的运行期崩溃。本插件的 0.2.0-rc.1 适配已逐项核对：`dsh-tools` 仍导出 `defineTool`；`dsh-settings` 的 `SettingsForms` 仍提供 `describe(options)`（`user` / `base` / `value` 三层语义未变）与 `configure({ auto })`；`dsh-client-ui-settings` 仍提供 `configForms` 服务。因此这是**纯 manifest 变更**，`index.js` 与 `lib/` 一行未改。
+
+DSH 的设置接口在 `0.1.6` 与 `0.1.7` 是两套不兼容的实现：`0.1.6` 的 `SettingsProvider` 提供 `get(ns)` / `installSection(...)` / `describe()`；`0.1.7` 的 `SettingsForms` 不再有这三者，只有 `configure/describe/update/replace/mutate`，配置改由插件条目的 `cordis.patch.yml` 承载。`0.2.0-rc.1` **沿用 `0.1.7` 的 `SettingsForms` 表面**（无 `get` / `installSection`），因此运行期探测直接命中 `0.1.7+` 分支，无需第三套判断。`index.js` 用 `typeof settings.get === "function"` 在运行期二选一，浏览器半侧用 `ctx.get("configForms")` 与 `ctx.get("settingsScope")` 探测可用服务。
 
 **两个容易踩死的坑（都已在真实 0.1.7 上验证）：**
 
