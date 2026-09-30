@@ -1,6 +1,6 @@
 {
   "name": "dsh-agnes-gen",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Agnes AI 图像 / 视频生成插件：注册 agnes_image 与 agnes_video 工具，内置跨进程 RPM 限流、429 退避与本地 ffmpeg 转 GIF；带 Web 配置卡（API Key / RPM 预设 / ffmpeg 检测）。",
   "keywords": [
     "dsh-plugin",
@@ -43,7 +43,9 @@
   },
   "scripts": {
     "check": "node selfcheck.mjs",
-    "check:peer": "node scripts/check-peer-range.mjs"
+    "check:concurrency": "node scripts/verify-concurrency.mjs",
+    "check:peer": "node scripts/check-peer-range.mjs",
+    "stress": "node scripts/stress-parallel.mjs"
   },
   "dsh": {
     "bundle": {

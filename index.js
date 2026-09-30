@@ -35,6 +35,7 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { defineTool } from "@deepseek-ai/dsh-tools";
@@ -268,15 +269,15 @@ export function apply(ctx, rawConfig) {
 
   ctx.tools.register(
     defineTool({
-      name: "agnes_image",
-      description:
-        "使用 Agnes AI 图像模型（agnes-image-2.5-flash）生成或编辑图片。文生图、图生图（传 image 参考图）、多图合成都可；返回已下载到本地的图片绝对路径。",
-      parameters: {
-        prompt: {
-          type: "string",
-          required: true,
-          description:
-            "图像提示词。文生图建议结构：[主体]+[场景]+[风格]+[光照]+[构图]+[质量]；图生图建议：[改动]+[新风格/场景]+[增删元素]+[需保留元素]。",
+    name: "agnes_image",
+    description:
+      "使用 Agnes AI 图像模型（agnes-image-2.5-flash）生成或编辑图片。文生图、图生图（传 image 参考图）、多图合成都可；返回已下载到本地的图片绝对路径。",
+    parameters: {
+      prompt: {
+        type: "string",
+        required: true,
+        description:
+          "图像提示词。文生图建议结构：[主体]+[场景]+[风格]+[光照]+[构图]+[质量]；图生图建议：[改动]+[新风格/场景]+[增删元素]+[需保留元素]。",
         },
         model: {
           type: "string",
@@ -304,6 +305,36 @@ export function apply(ctx, rawConfig) {
           description:
             "可选，自定义文件名主名（不含扩展名）。会给一个简短语义名，如 output_name={小猪打滚} → 生成 小猪打滚.png（单张直接用它；多张才追加 _0/_1）；注意每次生成的 output_name 要唯一，避免覆盖同目录同名文件。不传则用自动短名（时间戳_提示词前16字符）。会清洗掉路径分隔符/非法字符。",
         },
+      },
+      /**
+       * 把本工具标为「可并行」。
+       *
+       * DSH 的调度器是 **fail-closed** 的（dsh-tools 的 `executionMode`）：
+       *
+       *     if (!tool?.isConcurrencySafe) return { kind: "exclusive" };
+       *     return tool.isConcurrencySafe(args) === true ? { kind: "parallel" } : { kind: "exclusive" };
+       *
+       * 只有分类器返回严格 `true` 才算并行。未声明时，dsh-agent-loop 的
+       * `executeToolCalls` 会把每个调用切成单元素组（`group = [first]`），
+       * 于是同一步内的多个 agnes_image 严格串行：
+       *
+       *     4 张 1K 图 = 4 × 约 12s = 49.4s（实测）
+       *
+       * 图像可以并行的理由：
+       * - 无共享可变状态：每次调用只写自己的输出文件，互不干扰。
+       * - 限流已跨进程协调：`lib/rate-limit.js` 用状态文件 + `wx` 独占锁做滑动
+       *   窗口记账，为并发设计；同档位共用池，并行调用合计仍不超配置 RPM。
+       * - 失败互不牵连：每个调用有独立的 `exec.signal` 与重试链。
+       *
+       * @param {object} args 已通过参数校验的调用参数
+       * @returns {boolean} 是否允许与同批其他调用并行
+       */
+      isConcurrencySafe(args) {
+        // 3K / 4K 是 1 RPM 的极稀缺档位（见 FREE_RPM.image）：并发发出去只会
+        // 让后到的调用在 acquire 里干等一个完整窗口，没有吞吐收益，还白占
+        // 并行池名额、拖慢同批其他调用。这类调用退回独占，让它们老实排队。
+        const tier = String(args?.size ?? "1K").toUpperCase();
+        return !(tier === "3K" || tier === "4K");
       },
       output: {
         schema: {
@@ -465,6 +496,26 @@ export function apply(ctx, rawConfig) {
             value.warning ? [{ type: "text", text: `提示：${value.warning}` }] : [],
           );
         },
+      },
+      /**
+       * 视频**保持独占**（返回 false），与 agnes_image 的策略刻意不同。
+       *
+       * **1. 视频只有 1 RPM。** 见 `lib/rate-limit.js` 的 `FREE_RPM.video = 1`
+       * （Token Plan 也只有 5）。并发发两个视频任务，第二个必然在 acquire 里
+       * 等满一个 60s 窗口——没有吞吐收益，反而占住并行池名额。
+       *
+       * **2. 轮询与创建共用同一个配额池。** generateVideo 创建任务后要持续轮询
+       * （默认 2.5s 一次，逐步降频到 10s）。一次视频调用在完成的几分钟里会
+       * 反复申请 video 池配额。两个视频并行时，两边轮询互相抢那 1 RPM，会
+       * 互相把对方的轮询推后，制造出 429 与「进度卡住」的假象。
+       *
+       * **3. 单次调用已经 1–3 分钟。** 瓶颈是模型生成时长，不是调度排队，
+       * 并行的边际收益远小于它引入的配额争抢风险。
+       *
+       * @returns {boolean} 始终 false：视频调用串行执行
+       */
+      isConcurrencySafe() {
+        return false;
       },
       async execute(args, exec) {
         const cfg = effectiveConfig();

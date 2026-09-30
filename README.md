@@ -1,7 +1,7 @@
 # dsh-agnes-gen
 
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![version: 0.1.2](https://img.shields.io/badge/version-0.1.2-blue)
+![version: 0.1.3](https://img.shields.io/badge/version-0.1.3-blue)
 
 Agnes AI 图像 / 视频生成插件，为 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/deepseek-harness) 添加两个模型可见工具 `agnes_image` 与 `agnes_video`。内置跨进程 RPM 限流、429 退避，以及用本机 ffmpeg 把视频转成 GIF。
 
@@ -75,7 +75,7 @@ Agnes AI 图像 / 视频生成插件，为 [DSH（DeepSeek Harness）](https://g
 
 ```bash
 npm pack .
-dsh plugin --profile <profile> add ./dsh-agnes-gen-0.1.2.tgz
+dsh plugin --profile <profile> add ./dsh-agnes-gen-0.1.3.tgz
 ```
 
 ### 卸载（命令行）
@@ -204,7 +204,7 @@ agnes-gen:
 | `apiKeyCn` | 无（缺省） | 中国站的 Key，机密字段。仅 `site: cn` 时使用 |
 | `apiKeyIntl` | 无（缺省） | 国际站的 Key，机密字段。仅 `site: intl` 时使用 |
 | `apiKey` | 无（缺省） | **已弃用**：旧版单键字段，仅保留作脱敏槽位，不再生效 |
-| `plan` | `free` | 密钥档位预设：`free` / `token-plan`，决定各档位基线 RPM |
+| `plan` | `free` | 密钥档位预设：`free` / `enterprise` / `token-plan`，决定各档位基线 RPM |
 | `imageRpm1K`–`4K` | `0` | 逐档位覆盖，0 = 跟随预设。注意 3K/4K 恒为 1 RPM |
 | `videoRpm` | `0` | 视频 RPM 覆盖，0 = 跟随预设。创建与轮询共用该池 |
 | `rateLimit` | `true` | 是否启用本地跨进程限流 |
@@ -240,15 +240,17 @@ agnes-gen:
 
 Agnes 只公布 **RPM**（每分钟请求数），没有 RPS 概念；限制按**密钥类型**共享，不按单个 key 叠加——多建几个 key 不会增加配额。
 
-| 类型 | 免费/默认 | Token Plan |
-|---|---|---|
-| 图片 1K | 20 | 100 |
-| 图片 2K | 10 | 80 |
-| 图片 3K | **1** | **1** |
-| 图片 4K | **1** | **1** |
-| 视频 | **1** | 5 |
+| 类型 | 免费/默认 | 企业 | Token Plan |
+|---|---|---|---|
+| 图片 1K | 10 | 40 | 100 |
+| 图片 2K | 5 | 20 | 80 |
+| 图片 3K | **1** | **1** | **1** |
+| 图片 4K | **1** | **1** | **1** |
+| 视频 | **1** | 2 | 5 |
 
 > 3K / 4K 对所有档位都只有 1 RPM，批量任务请用 1K / 2K。这些是公开参考值，官方可能调整；可到你所用站点的控制台 Usage 页核对实际用量（`plan` 预设可以通过 `imageRpm*` / `videoRpm` 逐档位覆盖）。
+>
+> **两列口径的区别**：Agnes 对每个档位给两个数——「**允许发起 RPM**」（服务端准入闸门，超了直接 429）与「**实际 RPM**」（真正兑现的吞吐，明显更低）。上表用的是**实际 RPM**，因为按准入值发送必然撞 429、只能靠重试硬扛，实际吞吐反而更差。完整两列对照见 `lib/rate-limit.js` 的 `OFFICIAL_RPM`。
 
 限流在 `lib/rate-limit.js` 里用「滑动窗口状态文件 + 独占锁」做跨进程协调，多个会话 / 进程并发时**合计**计数。状态目录默认取系统临时目录下的 `agnes-ratelimit`：
 
@@ -256,7 +258,7 @@ Agnes 只公布 **RPM**（每分钟请求数），没有 RPS 概念；限制按*
 - 锁超时后放行，且不会误删他人锁；
 - 用环境变量 `AGNES_RATELIMIT_DIR` 可指到别的共享可写目录。
 
-> 视频只有 1 RPM，所以创建任务与轮询**共用一个 `video` 池**：一个视频从创建到完成（通常 1–3 分钟）的轮询会持续占用该池，此时再发起新视频任务会等待。
+> 视频的 RPM 极低（免费档 1、企业档 2、Token Plan 5），所以创建任务与轮询**共用一个 `video` 池**：一个视频从创建到完成（通常 1–3 分钟）的轮询会持续占用该池，此时再发起新视频任务会等待。也正因如此，`agnes_video` **刻意不参与并行调度**。
 
 ## ffmpeg 与 GIF
 
@@ -290,9 +292,14 @@ curl http://127.0.0.1:3080/plugins/dsh-agnes-gen/status
 
 ```bash
 npm run check              # 离线自检（等价于 node selfcheck.mjs）
+npm run check:concurrency  # 并发布局回归：分类器是否被正确定类
 npm run check:peer         # 当前 DSH 版本是否落在 peer 范围内
 npm run check:peer -- 0.3.0-rc.1   # 或指定一个版本先问一句
 ```
+
+`check:concurrency` 专门盯住 `agnes_image` / `agnes_video` 的 `isConcurrencySafe` 分类器：DSH 的调度器是 **fail-closed** 的（只有返回严格 `true` 才并行，未声明/抛错/参数非法一律独占），而 `defineTool` 在参数校验失败时还会把结果改成 `false`。这条链路任何一环断掉都只会**静默退回串行**、表面无异常，所以需要一条能在本地直接跑的断言。
+
+想实测真实吞吐（会消耗额度）可用 `npm run stress -- serial 4` / `npm run stress -- parallel 4`，键与站点分别由环境变量 `AGNES_API_KEY_OVERRIDE`、`AGNES_SITE` 提供；测吞吐时建议把 `AGNES_RATELIMIT_DIR` 指到独立目录，避免污染日常使用的限流窗口。
 
 离线自检检查依赖声明、manifest、工具定义、参数校验、settings schema 的机密标记、默认配置单一来源、两站密钥分离与脱敏、站点路由、浏览器半侧 bundle 加载等；其中一项会**用本地实际安装的 DSH 版本校验 peer 覆盖**，不覆盖就失败，因此升级 DSH 后跑一次即可知道要不要发版（详见 [DSH 版本适配](#dsh-版本适配)）。
 
@@ -302,6 +309,7 @@ npm run check:peer -- 0.3.0-rc.1   # 或指定一个版本先问一句
 
 | 版本 | 内容 |
 |---|---|
+| `0.1.3` | **同批多图并行执行**：`agnes_image` 声明 `isConcurrencySafe`——1K/2K 可与其他调用并行（实测 4 张 1K 由 49s 降至 21s），3K/4K 因 1 RPM 保持独占；`agnes_video` 刻意保持独占（轮询与创建共用同一配额池）。**校正并补全 RPM 预设**：免费档 1K/2K 由 `20/10` 修正为官方实际值 `10/5`，新增**企业（enterprise）档**；代码中同时记录官方的「允许发起 RPM」与「实际 RPM」两列口径（限流一律采用后者） |
 | `0.1.2` | 适配 DSH `0.2.0-rc.1`：`@deepseek-ai/dsh-tools` peer 追加 `^0.2.0-rc.1` 分支。DSH 自 `0.2.0-rc.1` 起按 `peerDependencies` 做整包兼容性闸门，不追加会被宿主**整体跳过**（`skipping profile bundle`）。**纯 manifest 变更，源码与行为不变**——`0.2.0-rc.1` 的设置接口（`SettingsForms.describe/configure/mutate`）与客户端 `configForms` 服务均未变，运行期探测直接命中 `0.1.7+` 分支。README 的适配说明同时改为**按版本线（看第二位）**表述，不再逐版本枚举 |
 | `0.1.1` | 完善 DSH `0.1.7-alpha` 支持：配置界面可见（`Config` 逐字段 `.volatile()`）、配置实时生效、保存 / 清除 Key 的状态确认与标记刷新；补充图形界面安装 / 卸载说明，精简版本适配章节 |
 | `0.1.0` | 首个版本：`agnes_image` / `agnes_video` 两个工具、跨进程 RPM 限流、429 退避、本地 ffmpeg 转 GIF、Web 配置卡、内置技能 |

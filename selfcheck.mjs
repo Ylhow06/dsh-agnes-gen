@@ -574,17 +574,26 @@ check("未声明的键会保留在解析结果里（实测行为）", withExtra.
 const { effectiveLimits, PLANS, PLAN_VALUES, defaultConfig, publicDefaults } = await import(
   new URL("./lib/config-schema.js", import.meta.url).href
 );
-check("预设可选值来自 PLANS", PLAN_VALUES.length === 2 && PLAN_VALUES.every((v) => PLANS[v]));
+check("预设可选值来自 PLANS", PLAN_VALUES.length === 3 && PLAN_VALUES.every((v) => PLANS[v]));
 
-// 免费档与 Token Plan 档必须各自给出公布的数值。
+// 免费档 / 企业档 / Token Plan 档必须各自给出公布的数值。
 // 用 defaultConfig() 作底：它已经包含全部 schema 默认值。
 const baseDefaults = defaultConfig();
 const freeLimits = effectiveLimits({ ...baseDefaults, plan: "free" });
+const enterpriseLimits = effectiveLimits({ ...baseDefaults, plan: "enterprise" });
 const tokenLimits = effectiveLimits({ ...baseDefaults, plan: "token-plan" });
 check(
   "免费档预设计算出正确的逐档位上限",
-  freeLimits.image["1K"] === 20 && freeLimits.image["2K"] === 10 && freeLimits.image["3K"] === 1 && freeLimits.video === 1,
+  freeLimits.image["1K"] === 10 && freeLimits.image["2K"] === 5 && freeLimits.image["3K"] === 1 && freeLimits.video === 1,
   `${JSON.stringify(freeLimits.image)} video=${freeLimits.video}`,
+);
+check(
+  "企业档预设计算出正确的逐档位上限",
+  enterpriseLimits.image["1K"] === 40 &&
+    enterpriseLimits.image["2K"] === 20 &&
+    enterpriseLimits.image["3K"] === 1 &&
+    enterpriseLimits.video === 2,
+  `${JSON.stringify(enterpriseLimits.image)} video=${enterpriseLimits.video}`,
 );
 check(
   "Token Plan 档预设计算出正确的逐档位上限",
@@ -592,8 +601,8 @@ check(
   `${JSON.stringify(tokenLimits.image)} video=${tokenLimits.video}`,
 );
 check(
-  "两种预设下 3K/4K 都是 1 RPM（Agnes 的硬限制）",
-  freeLimits.image["3K"] === 1 && freeLimits.image["4K"] === 1 && tokenLimits.image["3K"] === 1 && tokenLimits.image["4K"] === 1,
+  "所有预设下 3K/4K 都是 1 RPM（Agnes 的硬限制）",
+  [freeLimits, enterpriseLimits, tokenLimits].every((l) => l.image["3K"] === 1 && l.image["4K"] === 1),
 );
 
 // 逐档位覆盖优先于预设，且 0 表示跟随。
@@ -601,7 +610,7 @@ const overridden = effectiveLimits({ ...baseDefaults, plan: "free", imageRpm1K: 
 check("覆盖值 > 0 时优先于预设", overridden.image["1K"] === 5 && overridden.video === 3, `1K=${overridden.image["1K"]} video=${overridden.video}`);
 check(
   "未覆盖的档位仍跟随预设",
-  overridden.image["2K"] === 10 && overridden.image["4K"] === 1,
+  overridden.image["2K"] === 5 && overridden.image["4K"] === 1,
   `2K=${overridden.image["2K"]} 4K=${overridden.image["4K"]}`,
 );
 
@@ -690,14 +699,18 @@ check("0 表示跟随预设（不标记覆盖）", effectiveLimits({ ...baseDefa
 // 注意：schema 层已经拒绝未知 plan，但 effectiveLimits 仍要能容忍
 // 组合层（cordis.patch.yml 的 config:）绕过 schema 直接塞进来的值。
 const bogusPlan = effectiveLimits({ ...baseDefaults, plan: "nope" });
-check("未知预设回落到免费档", bogusPlan.plan === "free" && bogusPlan.image["1K"] === 20, JSON.stringify(bogusPlan.image));
+check("未知预设回落到免费档", bogusPlan.plan === "free" && bogusPlan.image["1K"] === 10, JSON.stringify(bogusPlan.image));
 
 // 数值表必须与限流器的公开参考值同源（不能各抄一份）。
-const { FREE_RPM, TOKEN_PLAN_RPM } = await import(new URL("./lib/rate-limit.js", import.meta.url).href);
+const { ENTERPRISE_RPM, FREE_RPM, TOKEN_PLAN_RPM } = await import(
+  new URL("./lib/rate-limit.js", import.meta.url).href
+);
 check(
   "预设数值直接引用 rate-limit.js 的参考值表",
   PLANS.free.image === FREE_RPM.image &&
     PLANS.free.video === FREE_RPM.video &&
+    PLANS.enterprise.image === ENTERPRISE_RPM.image &&
+    PLANS.enterprise.video === ENTERPRISE_RPM.video &&
     PLANS["token-plan"].image === TOKEN_PLAN_RPM.image &&
     PLANS["token-plan"].video === TOKEN_PLAN_RPM.video,
 );
